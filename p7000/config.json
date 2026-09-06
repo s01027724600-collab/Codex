@@ -1,0 +1,14 @@
+{
+  "host": "0.0.0.0",
+  "port": 7000,
+  "target_root": "D:\\所有已知课件",
+  "context_root": "D:\\context",
+  "download_dirs": [],
+  "extensions": [".pdf", ".pptx"],
+  "scan_interval": 5,
+  "screenshot_enabled": true,
+  "screenshot_interval_seconds": 60,
+  "screenshot_retention_days": 7,
+  "stable_seconds": 3,
+  "state_dir": ""
+}

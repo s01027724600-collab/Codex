@@ -1,0 +1,22 @@
+{
+  "host": "0.0.0.0",
+  "port": 9090,
+  "token": "",
+  "auth_file": "",
+  "password_hash": "",
+  "session_secret": "",
+  "session_days": 90,
+  "claude_bin": "claude.cmd",
+  "claude_args": ["-p", "--output-format", "stream-json"],
+  "stream_json": true,
+  "continue_session": false,
+  "auto_continue": true,
+  "model": "",
+  "effort": "",
+  "permission_mode": "",
+  "system_prompt": "如果任务无关且无说明，默认第一原则是隐蔽，不要搞出窗口及桌面显示变动",
+  "max_turns": 0,
+  "working_dir": ".",
+  "timeout_seconds": 1800,
+  "max_prompt_chars": 20000
+}

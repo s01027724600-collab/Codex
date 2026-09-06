@@ -1,0 +1,38 @@
+# Local archives, releases, and build outputs
+/archive/
+/releases/
+/release-tools/out/
+/release-tools/downloads/
+**/build/
+**/dist/
+**/__pycache__/
+
+# Bundled third-party tools and generated executables
+/claude-code/
+/tools/
+*.exe
+*.dll
+*.pyd
+*.pyc
+*.pkg
+*.pyz
+*.zip
+*.7z
+*.sha256
+
+# Runtime data and visual test captures
+*.log
+auth.json
+session.secret
+last_session.json
+state*/
+jobs/
+/p7000/截图/
+/p7050/*.png
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

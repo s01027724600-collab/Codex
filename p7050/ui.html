@@ -1,0 +1,1139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#f5f5f7">
+<title>7050 触控板</title>
+<style>
+:root { color-scheme:light; --bg:#f5f5f7; --text:#25272b; --muted:#747880; --line:#17233914; --blue:#0071e3; --red:#c92c40; --green:#278343; --key:56px; }
+* { box-sizing:border-box; }
+html,body { width:100%; height:100%; margin:0; }
+body { overflow:hidden; overscroll-behavior:none; background:var(--bg); color:var(--text); font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; -webkit-font-smoothing:antialiased; }
+button,input { font:inherit; }
+button { cursor:pointer; -webkit-tap-highlight-color:transparent; }
+button:disabled,input:disabled { opacity:.4; cursor:default; }
+button:focus-visible,summary:focus-visible,#pad:focus-visible { outline:3px solid #0071e350; outline-offset:2px; }
+.hidden { display:none!important; }
+.app { height:100dvh; display:grid; grid-template-rows:48px minmax(0,1fr); }
+header { display:flex; align-items:center; gap:8px; padding:0 max(12px,env(safe-area-inset-right)) 0 max(16px,env(safe-area-inset-left)); }
+.brand { font-size:16px; font-weight:700; }
+.title { color:var(--muted); font-size:12px; margin-right:8px; }
+.header-spacer { flex:1; }
+.connection { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); margin-right:8px; }
+.connection::before { content:""; width:6px; height:6px; border-radius:50%; background:#8e8e93; }
+.connection.ok::before { background:var(--green); }
+.connection.err { color:var(--red); }
+.connection.err::before { background:var(--red); }
+.text-button { min-height:36px; padding:0 12px; border:0; border-radius:9px; background:transparent; color:var(--muted); font-size:13px; touch-action:manipulation; }
+.text-button[aria-pressed="true"] { color:var(--blue); background:#0071e30b; }
+.text-button:active { background:#00000009; }
+main { position:relative; min-height:0; }
+#pad { position:absolute; inset:0 8px 8px; overflow:hidden; border:1px solid var(--line); border-radius:18px; background:radial-gradient(ellipse at 20% 100%,#eaf0f580,transparent 55%),linear-gradient(140deg,#fafbfc,#f1f3f6); touch-action:none; user-select:none; -webkit-user-select:none; cursor:crosshair; }
+.pad-hint { position:absolute; inset:0; display:grid; place-content:center; color:#9a9fa8; font-size:13px; letter-spacing:.03em; pointer-events:none; }
+#referenceGrid { position:absolute; inset:-1px; pointer-events:none; z-index:1; color:rgb(77 120 164 / .32); }
+.guide-line { position:absolute; background:currentColor; pointer-events:none; }
+.guide-line.vertical { top:0; bottom:0; width:1px; margin-left:-.5px; }
+.guide-line.horizontal { left:0; right:0; height:1px; margin-top:-.5px; }
+.guide-intersection { position:absolute; width:17px; height:17px; margin:-8.5px 0 0 -8.5px; background:linear-gradient(rgb(77 120 164 / .56),rgb(77 120 164 / .56)) center/1px 100% no-repeat,linear-gradient(rgb(77 120 164 / .56),rgb(77 120 164 / .56)) center/100% 1px no-repeat; pointer-events:none; }
+#touchCursor { position:absolute; width:22px; height:22px; margin:-11px 0 0 -11px; border:2px solid var(--blue); border-radius:50%; box-shadow:0 0 0 2px #fff,0 1px 7px #0002; pointer-events:none; z-index:2; }
+#touchCursor::after { content:""; position:absolute; inset:7px; border-radius:50%; background:var(--blue); }
+.glass { background:linear-gradient(145deg,#ffffffb3,#f4f7fc61); border:1px solid #ffffffc9; box-shadow:inset 0 1px 0 #fff,inset 0 -1px 0 #3445680a,0 4px 16px #28364c12,0 0 0 1px #46577314; backdrop-filter:blur(18px) saturate(1.45); -webkit-backdrop-filter:blur(18px) saturate(1.45); }
+#controlsOverlay { position:absolute; inset:0 8px 8px; z-index:6; pointer-events:none; }
+#directionPad { position:absolute; bottom:max(24px,env(safe-area-inset-bottom)); left:max(24px,env(safe-area-inset-left)); display:grid; grid-template-columns:repeat(3,var(--key)); grid-template-rows:repeat(2,var(--key)); gap:5px; pointer-events:none; }
+.direction { width:var(--key); height:var(--key); border-radius:15px; display:grid; place-items:center; color:#4c596c; }
+.direction::before { content:""; width:10px; height:10px; border-top:2px solid currentColor; border-right:2px solid currentColor; transform:rotate(-45deg); }
+#dirUp { grid-column:2; grid-row:1; }
+#dirLeft { grid-column:1; grid-row:2; }
+#dirLeft::before { transform:rotate(-135deg); }
+#dirDown { grid-column:2; grid-row:2; }
+#dirDown::before { transform:rotate(135deg); }
+#dirRight { grid-column:3; grid-row:2; }
+#dirRight::before { transform:rotate(45deg); }
+#actionPad { position:absolute; right:max(24px,env(safe-area-inset-right)); bottom:max(24px,env(safe-area-inset-bottom)); display:grid; grid-template-columns:repeat(3,72px); grid-auto-rows:52px; gap:7px; pointer-events:none; }
+.direction,.operation { pointer-events:auto; touch-action:none; user-select:none; -webkit-user-select:none; transition:background .1s,box-shadow .1s; }
+.operation { border-radius:15px; color:#3f4b5b; font-size:14px; font-weight:550; }
+.operation.primary { color:#0065c8; background:linear-gradient(145deg,#ffffffbf,#d7eaff7d); }
+.direction:active,.direction.active,.direction.pressed,.operation:active,.operation.pressed { background:#d4e9ffa6; color:#005bbb; box-shadow:inset 0 1px 3px #276bb820,0 0 0 1px #88b6e855; }
+#drag.dragging { color:var(--red); background:#ffe8eeae; border-color:#ffb6c377; }
+#previewPanel { position:absolute; top:16px; right:24px; z-index:4; width:clamp(320px,27vw,460px); padding:10px; border-radius:17px; pointer-events:none; }
+.preview-heading { display:flex; align-items:center; gap:12px; margin:0 0 8px; }
+.preview-heading h2 { margin:0; font-size:12px; font-weight:600; }
+#previewStatus { margin:0; flex:1; color:var(--muted); font-size:11px; text-align:right; }
+#previewBody { display:grid; grid-template-columns:minmax(0,1fr) 100px; gap:10px; min-height:0; }
+.detail-stage { min-width:0; min-height:0; aspect-ratio:12/7; display:grid; place-items:center; overflow:hidden; border-radius:9px; background:#e8ecf180; }
+.preview-frame { position:relative; overflow:hidden; background:#e9e9ed; border-radius:7px; pointer-events:none; }
+.preview-frame canvas { display:block; width:100%; height:100%; }
+#detailFrame { width:100%; height:100%; }
+.overview-column { display:flex; flex-direction:column; gap:6px; min-width:0; }
+#overviewFrame { width:100%; aspect-ratio:16/10; }
+.preview-caption,.meta { color:var(--muted); font-size:10px; }
+.meta { display:flex; flex-direction:column; gap:3px; margin-top:auto; }
+.preview-cursor,#cursorDot { position:absolute; width:14px; height:14px; margin:-7px 0 0 -7px; border:2px solid var(--blue); border-radius:50%; box-shadow:0 0 0 1px #fff,0 1px 4px #0005; pointer-events:none; z-index:4; }
+.preview-cursor::after,#cursorDot::after { content:""; position:absolute; width:2px; height:2px; top:4px; left:4px; border-radius:50%; background:var(--blue); }
+#detailCursor { width:18px; height:18px; margin:-9px 0 0 -9px; }
+#detailCursor::after { width:4px; height:4px; top:5px; left:5px; }
+#cursorDot.stale,#detailFrame.outside .preview-cursor { border-style:dashed; }
+#regions { position:absolute; inset:0; z-index:2; pointer-events:none; }
+.region { position:absolute; border:1px solid #0071e366; background:#0071e30b; border-radius:3px; }
+.region.input { border-color:#248a3d88; }
+.region.caption { border-color:#d7001588; }
+.settings { position:relative; font-size:13px; }
+.settings summary { display:block; cursor:pointer; padding:10px; color:var(--muted); list-style:none; border-radius:8px; }
+.settings summary::-webkit-details-marker { display:none; }
+.settings-body { position:absolute; top:40px; right:0; z-index:15; width:248px; padding:16px; background:#fffffff2; border:1px solid var(--line); border-radius:14px; box-shadow:0 8px 30px #0002; }
+.settings-label { display:block; color:var(--muted); font-size:12px; margin-bottom:8px; }
+.mode-switch { display:flex; gap:4px; padding:3px; background:#ededf1; border-radius:9px; }
+.mode-switch button { flex:1; min-height:36px; border:0; border-radius:7px; background:transparent; color:var(--muted); font-size:13px; }
+.mode-switch button[aria-pressed="true"] { background:#fff; color:var(--text); box-shadow:0 1px 3px #0001; }
+.speed-row { display:block; margin:16px 0; font-size:12px; color:var(--muted); }
+#joystickSpeed { width:100%; display:block; height:28px; margin:6px 0 0; accent-color:var(--blue); }
+.action { min-height:40px; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:#fafafa; color:var(--text); font-size:13px; }
+.settings-actions { display:flex; gap:6px; }
+.assist-info { margin-top:8px; color:var(--muted); font-size:11px; }
+#loginLayer { position:fixed; inset:48px 0 0; z-index:20; display:grid; place-items:center; padding:20px; background:#f5f5f7df; backdrop-filter:blur(12px); }
+.login-card { width:min(340px,100%); padding:24px; background:#fff; border:1px solid var(--line); border-radius:18px; box-shadow:0 12px 40px #0001; }
+.login-card h1 { margin:0 0 6px; font-size:22px; }
+.login-card p { margin:0 0 16px; color:var(--muted); font-size:13px; }
+.login-card input { width:100%; height:46px; border:1px solid #0003; border-radius:10px; padding:0 12px; }
+.login-card button { width:100%; margin-top:12px; background:var(--blue); color:white; }
+#loginError { min-height:18px; margin-top:8px; color:var(--red); font-size:12px; }
+@supports not (backdrop-filter:blur(1px)) { .glass { background:#eef3f9e6; } }
+@media(max-width:700px) {
+  :root { --key:48px; }
+  header { gap:2px; padding:0 8px; }
+  .title,.connection { display:none; }
+  .text-button { padding:0 9px; }
+  #directionPad { left:12px; bottom:16px; gap:4px; }
+  #actionPad { right:12px; bottom:16px; grid-template-columns:repeat(3,54px); grid-auto-rows:48px; gap:5px; }
+  .operation { font-size:12px; border-radius:13px; }
+  #previewPanel { top:12px; right:16px; width:min(320px,calc(100% - 32px)); }
+  #previewBody { grid-template-columns:minmax(0,1fr) 80px; }
+  .pad-hint { font-size:12px; }
+}
+@media(max-height:550px) and (orientation:landscape) {
+  :root { --key:44px; }
+  .app { grid-template-rows:42px minmax(0,1fr); }
+  #directionPad,#actionPad { bottom:12px; }
+  #actionPad { grid-auto-rows:44px; }
+  #previewPanel { width:300px; top:8px; right:16px; }
+  #previewBody { grid-template-columns:minmax(0,1fr) 74px; }
+  .meta { display:none; }
+  .pad-hint { place-content:start center; padding-top:24px; }
+}
+@media(prefers-reduced-motion:reduce) { .direction,.operation { transition:none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="brand">7050</span><span class="title">触控板</span>
+    <span class="header-spacer"></span>
+    <span id="connection" class="connection">连接中</span>
+    <button id="highlightToggle" class="text-button" type="button" aria-pressed="false" title="在教学机上显示跟随鼠标的淡定位线">鼠标定位</button>
+    <button id="guidesToggle" class="text-button" type="button" aria-pressed="false" aria-controls="referenceGrid" title="两端显示参考线，并使用位置映射">参考线</button>
+    <button id="overlayToggle" class="text-button" type="button" aria-pressed="true" aria-controls="controlsOverlay">辅助</button>
+    <button id="previewToggle" class="text-button" type="button" aria-pressed="true" aria-controls="previewPanel">画面</button>
+    <details class="settings"><summary>设置</summary><div class="settings-body">
+      <span class="settings-label">触控方式</span>
+      <div class="mode-switch" role="group" aria-label="触控方式"><button id="relativeMode" type="button" aria-pressed="false">相对移动</button><button id="absoluteMode" type="button" aria-pressed="true">位置映射</button></div>
+      <label class="speed-row">方向键速度<input id="joystickSpeed" type="range" min="30" max="150" value="85" aria-label="方向键速度"></label>
+      <div class="settings-actions"><button id="center" class="action" type="button">鼠标居中</button><button id="assist" class="action" type="button" aria-pressed="false">显示区域</button></div>
+      <div id="assistInfo" class="assist-info">关闭</div>
+    </div></details>
+    <button id="logout" class="text-button hidden" type="button">退出</button>
+  </header>
+  <main>
+    <div id="pad" role="application" aria-label="盲触控板：触碰定位，轻点单击，双指滚动" tabindex="0">
+      <span class="pad-hint">触碰定位 · 轻点单击 · 双指滚动</span>
+      <div id="referenceGrid" class="hidden" aria-hidden="true">
+        <span class="guide-line vertical" style="left:33.3333333333%"></span><span class="guide-line vertical" style="left:66.6666666667%"></span>
+        <span class="guide-line horizontal" style="top:33.3333333333%"></span><span class="guide-line horizontal" style="top:66.6666666667%"></span>
+        <span class="guide-intersection" style="left:33.3333333333%;top:33.3333333333%"></span><span class="guide-intersection" style="left:66.6666666667%;top:33.3333333333%"></span>
+        <span class="guide-intersection" style="left:33.3333333333%;top:66.6666666667%"></span><span class="guide-intersection" style="left:66.6666666667%;top:66.6666666667%"></span>
+      </div>
+      <span id="touchCursor" class="hidden"></span>
+    </div>
+    <section id="previewPanel" class="glass" aria-label="鼠标位置预览">
+      <div class="preview-heading"><h2>鼠标附近</h2><p id="previewStatus">连接后显示</p></div>
+      <div id="previewBody">
+        <div id="detailStage" class="detail-stage"><div id="detailFrame" class="preview-frame"><canvas id="detailImage" class="hidden" aria-label="鼠标附近的画面"></canvas><span id="detailCursor" class="preview-cursor hidden"></span></div></div>
+        <div class="overview-column"><div class="preview-caption">全屏位置</div><div id="overviewFrame" class="preview-frame"><canvas id="overviewImage" class="hidden" aria-label="电脑屏幕位置预览"></canvas><div id="regions"></div><span id="cursorDot" class="hidden"></span></div><div class="meta"><span id="screenInfo">屏幕 --</span><span id="modeInfo">位置同步中</span></div></div>
+      </div>
+    </section>
+    <div id="controlsOverlay">
+      <div id="directionPad" role="group" aria-label="辅助方向键">
+        <button id="dirUp" class="direction glass" type="button" data-dx="0" data-dy="-1" aria-label="向上移动"></button>
+        <button id="dirLeft" class="direction glass" type="button" data-dx="-1" data-dy="0" aria-label="向左移动"></button>
+        <button id="dirDown" class="direction glass" type="button" data-dx="0" data-dy="1" aria-label="向下移动"></button>
+        <button id="dirRight" class="direction glass" type="button" data-dx="1" data-dy="0" aria-label="向右移动"></button>
+      </div>
+      <div id="actionPad" role="group" aria-label="辅助操作">
+        <button id="click" class="operation glass primary" type="button">单击</button>
+        <button id="doubleClick" class="operation glass" type="button">双击</button>
+        <button id="rightClick" class="operation glass" type="button">右键</button>
+        <button id="drag" class="operation glass" type="button" aria-pressed="false">拖动</button>
+        <button id="scrollUp" class="operation glass" type="button">上滚</button>
+        <button id="scrollDown" class="operation glass" type="button">下滚</button>
+      </div>
+    </div>
+  </main>
+  <div id="loginLayer"><form id="loginForm" class="login-card"><h1>连接电脑</h1><p>输入网关密码</p><input id="password" type="password" autocomplete="current-password" placeholder="密码" aria-label="网关密码"><button class="action" type="submit">连接</button><div id="loginError" role="alert"></div></form></div>
+</div>
+<script>
+'use strict';
+    const $ = id => document.getElementById(id);
+    const controls = ['absoluteMode', 'relativeMode', 'highlightToggle', 'guidesToggle', 'overlayToggle', 'dirUp', 'dirDown', 'dirLeft', 'dirRight', 'joystickSpeed', 'click', 'doubleClick', 'rightClick', 'center', 'drag', 'scrollUp', 'scrollDown', 'assist', 'previewToggle'];
+
+    let logged = false;
+    let highlightOn = false;
+    let highlightBusy = false;
+    let highlightRevision = 0;
+    let guidesOn = false;
+    let guidesBusy = false;
+    let guidesRevision = 0;
+    const savedPadMode = localStorage.getItem('pad-mode');
+    const legacyPadMode = localStorage.getItem('mode');
+    let padMode = ['absolute', 'relative'].includes(savedPadMode) ? savedPadMode
+      : ['absolute', 'relative'].includes(legacyPadMode) ? legacyPadMode : 'absolute';
+    let overlayOn = localStorage.getItem('control-overlay') !== 'off';
+    const padPointers = new Map();
+    let padMulti = false;
+    let padScrollCarry = 0;
+    const directionPointers = new Map();
+    const directionKeys = new Set();
+    let directionFrame = null;
+    let directionStarted = 0;
+    let directionLastTime = 0;
+    let directionElapsed = 0;
+    let directionCarry = { x: 0, y: 0 };
+    let screenData = null;
+    let dragLocked = false;
+    let remoteButtonDown = false;
+    let holdTimer = null;
+    let holdBusy = false;
+    let assistOn = false;
+    let assistRevision = -1;
+    let assistTimer = null;
+    let assistBusy = false;
+    let inputQueue = [];
+    let inputBusy = false;
+    let inputEpoch = 0;
+    let cursorData = null;
+    let positionTimer = null;
+    let positionBusy = false;
+    let cursorRevision = 0;
+    let previewOn = localStorage.getItem('pointer-preview') !== 'off';
+    let previewTimer = null;
+    let previewBusy = false;
+    let previewAbort = null;
+    let previewEpoch = 0;
+    let previewCrop = null;
+    let previewScreen = null;
+    let lastActivity = 0;
+    const cancelActionPointers = [];
+
+    $('joystickSpeed').value = Math.max(30, Math.min(150, Number(localStorage.getItem('joystick-speed')) || 85));
+
+    async function api(path, options = {}) {
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      if (options.signal?.aborted) controller.abort();
+      options.signal?.addEventListener('abort', cancel, { once: true });
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      try {
+        const response = await fetch(path, Object.assign({ credentials: 'same-origin' }, options, { signal: controller.signal }));
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const error = new Error(data.error || `HTTP ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
+        return data;
+      } finally {
+        clearTimeout(timeout);
+        options.signal?.removeEventListener('abort', cancel);
+      }
+    }
+
+    function setConnection(text, state = '') {
+      const node = $('connection');
+      node.textContent = text;
+      node.className = `connection ${state}`.trim();
+    }
+
+    function paintHighlight() {
+      $('highlightToggle').setAttribute('aria-pressed', String(highlightOn));
+      $('highlightToggle').disabled = !logged || highlightBusy;
+    }
+
+    function applyHighlight(state) {
+      if (typeof state?.enabled !== 'boolean') return;
+      highlightOn = state.enabled;
+      $('highlightToggle').textContent = state.ok === false ? '定位重试' : '鼠标定位';
+      $('highlightToggle').title = state.error || (highlightOn ? '关闭教学机上的鼠标定位线' : '在教学机上显示跟随鼠标的淡定位线');
+      paintHighlight();
+    }
+
+    $('highlightToggle').onclick = async () => {
+      if (!logged || highlightBusy) return;
+      highlightBusy = true;
+      highlightRevision++;
+      paintHighlight();
+      try {
+        const state = await api('/crosshair', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !highlightOn })
+        });
+        if (typeof state.enabled !== 'boolean' || !state.ok) throw new Error('鼠标定位未同步');
+        if (logged) applyHighlight(state);
+      } catch (error) {
+        if (error.status === 401) setLogged(false);
+        $('highlightToggle').textContent = '定位重试';
+        $('highlightToggle').title = '切换失败，请重试';
+      } finally {
+        highlightRevision++;
+        highlightBusy = false;
+        paintHighlight();
+      }
+    };
+
+    function paintGuides() {
+      $('referenceGrid').classList.toggle('hidden', !logged || !guidesOn);
+      $('guidesToggle').setAttribute('aria-pressed', String(guidesOn));
+      $('guidesToggle').disabled = !logged || guidesBusy;
+      $('relativeMode').disabled = !logged || guidesBusy || guidesOn;
+      $('absoluteMode').disabled = !logged || guidesBusy;
+      $('relativeMode').title = guidesOn ? '关闭参考线后可切换相对移动' : '';
+    }
+
+    function applyGuides(state) {
+      if (typeof state?.enabled !== 'boolean') return;
+      guidesOn = state.enabled;
+      if (guidesOn && padMode !== 'absolute') updatePadMode('absolute');
+      $('guidesToggle').textContent = state.ok === false ? '参考线重试' : '参考线';
+      $('guidesToggle').title = state.error || (guidesOn ? '关闭两端参考线' : '两端显示参考线，并使用位置映射');
+      paintGuides();
+    }
+
+    $('guidesToggle').onclick = async () => {
+      if (!logged || guidesBusy) return;
+      emergencyRelease();
+      guidesBusy = true;
+      guidesRevision++;
+      paintGuides();
+      try {
+        const state = await api('/guides', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !guidesOn })
+        });
+        if (typeof state.enabled !== 'boolean' || !state.ok) throw new Error('参考线未同步');
+        if (logged) applyGuides(state);
+      } catch (error) {
+        if (error.status === 401) setLogged(false);
+        $('guidesToggle').textContent = '参考线重试';
+        $('guidesToggle').title = '切换失败，请重试';
+      } finally {
+        guidesRevision++;
+        guidesBusy = false;
+        paintGuides();
+      }
+    };
+
+    function setLogged(value) {
+      logged = value;
+      $('loginLayer').classList.toggle('hidden', value);
+      $('logout').classList.toggle('hidden', !value);
+      controls.forEach(id => { $(id).disabled = !value; });
+      paintHighlight();
+      paintGuides();
+      if (value) {
+        setConnection('已连接', 'ok');
+        resumeTracking();
+      } else {
+        setConnection('未连接');
+        stopTracking();
+        clearInputQueue();
+        stopDirections();
+        stopPad();
+        cancelActionPointers.forEach(cancel => cancel());
+        setDragging(false);
+        if (remoteButtonDown) sendRelease();
+        cursorData = null;
+        $('cursorDot').classList.add('hidden');
+        clearPreview();
+      }
+    }
+
+    async function post(path, data = {}) {
+      if (!logged) return null;
+      try {
+        return await api(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+      } catch (error) {
+        setConnection(error.status === 401 ? '未连接' : '连接异常', 'err');
+        if (error.status === 401) setLogged(false);
+        return null;
+      }
+    }
+
+    function clearInputQueue() {
+      inputEpoch++;
+      inputQueue.splice(0).forEach(task => task.resolve(null));
+    }
+
+    function enqueueInput(path, data = {}, source = 'action') {
+      if (!logged) return Promise.resolve(null);
+      noteActivity();
+      const last = inputQueue[inputQueue.length - 1];
+      if (path === '/move' && last?.path === path && last.source === source && last.data.mode === data.mode) {
+        if (data.mode === 'relative') {
+          last.data.dx += data.dx;
+          last.data.dy += data.dy;
+        } else last.data = data;
+        return last.promise;
+      }
+      const task = { path, data, source, epoch: inputEpoch };
+      task.promise = new Promise(resolve => { task.resolve = resolve; });
+      inputQueue.push(task);
+      drainInput();
+      return task.promise;
+    }
+
+    async function drainInput() {
+      if (inputBusy) return;
+      inputBusy = true;
+      try {
+        while (logged && inputQueue.length) {
+          const task = inputQueue.shift();
+          // A single ordered stream keeps a tap at its own location, even on a slow connection.
+          cursorRevision++;
+          if (task.path === '/button' && task.data.action === 'down') remoteButtonDown = true;
+          const result = await post(task.path, task.data);
+          cursorRevision++;
+          if (task.epoch !== inputEpoch) {
+            if (task.path === '/button' && task.data.action === 'down') sendRelease();
+            task.resolve(null);
+            continue;
+          }
+          if (!result) {
+            stopDirections();
+            stopPad();
+            cancelActionPointers.forEach(cancel => cancel());
+            clearInputQueue();
+            if (remoteButtonDown || dragLocked) sendRelease();
+            setDragging(false);
+            $('cursorDot').classList.add('stale');
+            task.resolve(null);
+            break;
+          }
+          if (task.path === '/move') applyCursor(result);
+          if (task.path === '/release') remoteButtonDown = false;
+          task.resolve(result);
+        }
+      } finally {
+        inputBusy = false;
+      }
+    }
+
+    function discardInput(source) {
+      inputQueue = inputQueue.filter(task => {
+        if (task.source !== source) return true;
+        task.resolve(null);
+        return false;
+      });
+    }
+
+    function directionVector() {
+      let x = Number(directionKeys.has('ArrowRight')) - Number(directionKeys.has('ArrowLeft'));
+      let y = Number(directionKeys.has('ArrowDown')) - Number(directionKeys.has('ArrowUp'));
+      directionPointers.forEach(pointer => { x += pointer.dx; y += pointer.dy; });
+      const length = Math.max(1, Math.hypot(x, y));
+      return { x: x / length, y: y / length };
+    }
+
+    function paintDirections() {
+      ['dirUp', 'dirDown', 'dirLeft', 'dirRight'].forEach(id => {
+        const node = $(id);
+        const active = [...directionPointers.values()].some(pointer => pointer.activeId === id) ||
+          directionKeys.has({ dirUp: 'ArrowUp', dirDown: 'ArrowDown', dirLeft: 'ArrowLeft', dirRight: 'ArrowRight' }[id]);
+        node.classList.toggle('pressed', active);
+      });
+    }
+
+    function startDirections() {
+      paintDirections();
+      if (directionFrame !== null) return;
+      directionStarted = directionLastTime = performance.now();
+      directionElapsed = 0;
+      const vector = directionVector();
+      // A short press is a fine nudge; holding adds a gentle repeat ramp.
+      if (!inputBusy && !inputQueue.length && (vector.x || vector.y)) {
+        enqueueInput('/move', { mode: 'relative', dx: Math.round(vector.x * 3), dy: Math.round(vector.y * 3) }, 'direction');
+      }
+      directionFrame = requestAnimationFrame(tickDirections);
+    }
+
+    function tickDirections(now) {
+      directionFrame = null;
+      if (!logged || !overlayOn || document.hidden || (!directionPointers.size && !directionKeys.size)) return;
+      const dt = Math.max(0, Math.min(.05, (now - directionLastTime) / 1000));
+      directionLastTime = now;
+      directionElapsed = Math.min(.05, directionElapsed + dt);
+      const held = now - directionStarted;
+      const vector = directionVector();
+      // Never accumulate held movement behind slow HTTP requests.
+      if (held >= 180 && !inputBusy && !inputQueue.length && directionElapsed >= .025) {
+        const speed = Number($('joystickSpeed').value) * 8 * (.25 + .75 * clamp01((held - 180) / 650));
+        directionCarry.x += vector.x * speed * directionElapsed;
+        directionCarry.y += vector.y * speed * directionElapsed;
+        directionElapsed = 0;
+        const dx = Math.trunc(directionCarry.x), dy = Math.trunc(directionCarry.y);
+        directionCarry.x -= dx;
+        directionCarry.y -= dy;
+        if (dx || dy) enqueueInput('/move', { mode: 'relative', dx, dy }, 'direction');
+      }
+      directionFrame = requestAnimationFrame(tickDirections);
+    }
+
+    function stopDirections() {
+      const owners = [...directionPointers.entries()];
+      directionPointers.clear();
+      directionKeys.clear();
+      cancelAnimationFrame(directionFrame);
+      directionFrame = null;
+      directionElapsed = 0;
+      directionCarry = { x: 0, y: 0 };
+      discardInput('direction');
+      paintDirections();
+      owners.forEach(([id, pointer]) => {
+        if (pointer.node.hasPointerCapture(id)) pointer.node.releasePointerCapture(id);
+      });
+    }
+
+    ['dirUp', 'dirDown', 'dirLeft', 'dirRight'].forEach(id => {
+      const node = $(id);
+      node.addEventListener('pointerdown', event => {
+        if (!logged || !overlayOn || node.disabled || event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        directionPointers.set(event.pointerId, { node, activeId: id, dx: Number(node.dataset.dx), dy: Number(node.dataset.dy) });
+        node.setPointerCapture(event.pointerId);
+        startDirections();
+      });
+      node.addEventListener('pointermove', event => {
+        const pointer = directionPointers.get(event.pointerId);
+        if (!pointer) return;
+        event.preventDefault();
+        const hit = document.elementFromPoint(event.clientX, event.clientY)?.closest('#directionPad button');
+        pointer.activeId = hit?.id || null;
+        pointer.dx = Number(hit?.dataset.dx || 0);
+        pointer.dy = Number(hit?.dataset.dy || 0);
+        paintDirections();
+      });
+      ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(type => node.addEventListener(type, event => {
+        if (!directionPointers.has(event.pointerId)) return;
+        event.preventDefault();
+        directionPointers.delete(event.pointerId);
+        if (node.hasPointerCapture(event.pointerId)) node.releasePointerCapture(event.pointerId);
+        if (!directionPointers.size && !directionKeys.size) stopDirections();
+        else paintDirections();
+        if (type !== 'pointerup' && (dragLocked || remoteButtonDown)) releaseDrag();
+      }));
+      node.addEventListener('contextmenu', event => event.preventDefault());
+      node.addEventListener('keydown', event => {
+        const key = event.key === ' ' || event.key === 'Enter'
+          ? { dirUp: 'ArrowUp', dirDown: 'ArrowDown', dirLeft: 'ArrowLeft', dirRight: 'ArrowRight' }[id] : event.key;
+        if (!logged || !overlayOn || !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(key)) return;
+        event.preventDefault();
+        directionKeys.add(key);
+        startDirections();
+      });
+      node.addEventListener('keyup', event => {
+        const key = event.key === ' ' || event.key === 'Enter'
+          ? { dirUp: 'ArrowUp', dirDown: 'ArrowDown', dirLeft: 'ArrowLeft', dirRight: 'ArrowRight' }[id] : event.key;
+        if (!directionKeys.has(key)) return;
+        event.preventDefault();
+        directionKeys.delete(key);
+        if (!directionKeys.size && !directionPointers.size) stopDirections();
+        else paintDirections();
+      });
+      node.addEventListener('blur', () => { if (directionKeys.size) stopDirections(); });
+    });
+    $('joystickSpeed').onchange = () => localStorage.setItem('joystick-speed', $('joystickSpeed').value);
+
+    function stopPad() {
+      const owners = [...padPointers.keys()];
+      padPointers.clear();
+      padMulti = false;
+      padScrollCarry = 0;
+      $('pad').classList.remove('active');
+      discardInput('pad');
+      owners.forEach(id => { if ($('pad').hasPointerCapture(id)) $('pad').releasePointerCapture(id); });
+    }
+
+    function moveAbsolute(x, y) {
+      const rect = $('pad').getBoundingClientRect();
+      enqueueInput('/move', {
+        mode: 'absolute', nx: clamp01((x - rect.left) / Math.max(1, rect.width)),
+        ny: clamp01((y - rect.top) / Math.max(1, rect.height))
+      }, 'pad');
+    }
+
+    function updatePadPointer(event) {
+      const pointer = padPointers.get(event.pointerId);
+      if (!pointer) return;
+      const dx = event.clientX - pointer.x, dy = event.clientY - pointer.y;
+      pointer.x = event.clientX;
+      pointer.y = event.clientY;
+      pointer.travel = Math.max(pointer.travel, Math.hypot(pointer.x - pointer.startX, pointer.y - pointer.startY));
+      if (padMulti) {
+        // Only contacts that started on the pad belong to this gesture.
+        if (padPointers.size >= 2) {
+          padScrollCarry += dy / padPointers.size;
+          const steps = Math.trunc(padScrollCarry / 24);
+          if (steps) {
+            padScrollCarry -= steps * 24;
+            enqueueInput('/wheel', { delta: steps * 120 }, 'pad');
+          }
+        }
+        return;
+      }
+      if (padMode === 'absolute') {
+        if (dx || dy) moveAbsolute(pointer.x, pointer.y);
+      } else {
+        pointer.pendingX += dx;
+        pointer.pendingY += dy;
+        if (pointer.travel >= 6 || dragLocked) {
+          const mx = Math.round(pointer.pendingX), my = Math.round(pointer.pendingY);
+          pointer.pendingX -= mx;
+          pointer.pendingY -= my;
+          if (mx || my) enqueueInput('/move', { mode: 'relative', dx: mx, dy: my }, 'pad');
+        }
+      }
+    }
+
+    $('pad').addEventListener('pointerdown', event => {
+      if (!logged || guidesBusy || event.button !== 0 || event.target.closest('#controlsOverlay, header, .settings')) return;
+      event.preventDefault();
+      padPointers.set(event.pointerId, {
+        x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY,
+        pendingX: 0, pendingY: 0, travel: 0, started: performance.now(), suppressClick: dragLocked
+      });
+      $('pad').setPointerCapture(event.pointerId);
+      $('pad').classList.add('active');
+      if (padPointers.size >= 2) {
+        padMulti = true;
+        padScrollCarry = 0;
+        padPointers.forEach(pointer => { pointer.suppressClick = true; });
+      } else if (padMode === 'absolute') moveAbsolute(event.clientX, event.clientY);
+    });
+    $('pad').addEventListener('pointermove', event => {
+      if (!padPointers.has(event.pointerId)) return;
+      event.preventDefault();
+      updatePadPointer(event);
+    });
+    $('pad').addEventListener('pointerup', event => {
+      const pointer = padPointers.get(event.pointerId);
+      if (!pointer) return;
+      event.preventDefault();
+      updatePadPointer(event);
+      const tap = !padMulti && !pointer.suppressClick && !dragLocked && pointer.travel <= 8 && performance.now() - pointer.started <= 280;
+      padPointers.delete(event.pointerId);
+      if ($('pad').hasPointerCapture(event.pointerId)) $('pad').releasePointerCapture(event.pointerId);
+      if (!padPointers.size) {
+        padMulti = false;
+        padScrollCarry = 0;
+        $('pad').classList.remove('active');
+      }
+      // Two quick taps are two normal OS clicks, so Windows retains its own double-click timing.
+      if (tap) enqueueInput('/button', { action: 'click' }, 'pad');
+    });
+    ['pointercancel', 'lostpointercapture'].forEach(type => $('pad').addEventListener(type, event => {
+      if (!padPointers.has(event.pointerId)) return;
+      stopPad();
+      if (dragLocked || remoteButtonDown) releaseDrag();
+    }));
+    $('pad').addEventListener('contextmenu', event => event.preventDefault());
+
+    function updatePadMode(next) {
+      if (next === 'relative' && (guidesOn || guidesBusy)) return;
+      emergencyRelease();
+      padMode = next === 'absolute' ? 'absolute' : 'relative';
+      localStorage.setItem('pad-mode', padMode);
+      $('absoluteMode').setAttribute('aria-pressed', String(padMode === 'absolute'));
+      $('relativeMode').setAttribute('aria-pressed', String(padMode === 'relative'));
+      $('pad').setAttribute('aria-label', padMode === 'relative' ? '盲触控板：滑动移动，轻点单击，双指滚动' : '盲触控板：触碰定位，轻点单击，双指滚动');
+      const hint = document.querySelector('.pad-hint');
+      if (hint) hint.textContent = padMode === 'relative' ? '滑动移动 · 轻点单击 · 双指滚动' : '触碰定位 · 轻点单击 · 双指滚动';
+    }
+    $('absoluteMode').onclick = () => updatePadMode('absolute');
+    $('relativeMode').onclick = () => updatePadMode('relative');
+
+    function updateOverlayToggle() {
+      $('controlsOverlay').classList.toggle('hidden', !overlayOn);
+      $('overlayToggle').textContent = '辅助';
+      $('overlayToggle').setAttribute('aria-pressed', String(overlayOn));
+      $('overlayToggle').title = overlayOn ? '隐藏方向键和操作按钮' : '显示方向键和操作按钮';
+    }
+    $('overlayToggle').onclick = () => {
+      // Cancel owners before hiding their hit areas; a lifted finger must never click through.
+      emergencyRelease();
+      overlayOn = !overlayOn;
+      localStorage.setItem('control-overlay', overlayOn ? 'on' : 'off');
+      updateOverlayToggle();
+    };
+
+    function setDragging(value) {
+      dragLocked = value;
+      if (!value) { clearTimeout(holdTimer); holdTimer = null; }
+      if (value) padPointers.forEach(pointer => { pointer.suppressClick = true; });
+      $('drag').textContent = value ? '结束拖动' : '拖动';
+      $('drag').classList.toggle('dragging', value);
+      $('drag').setAttribute('aria-pressed', String(value));
+      ['click', 'doubleClick', 'rightClick', 'center'].forEach(id => { $(id).disabled = !logged || value; });
+    }
+
+    function releaseDrag() {
+      if (!dragLocked && !remoteButtonDown) return Promise.resolve();
+      setDragging(false);
+      return enqueueInput('/release');
+    }
+
+    // Secondary touches do not reliably generate a browser click while the left thumb is held.
+    // Handle each action's touch release explicitly; preserve mouse and keyboard activation.
+    function bindAction(id, action) {
+      const node = $(id);
+      let pointer = null, cancelled = false, startX = 0, startY = 0, lastTouch = -Infinity;
+      const clear = () => {
+        const owner = pointer;
+        pointer = null;
+        if (owner !== null) lastTouch = performance.now();
+        node.classList.remove('pressed');
+        if (owner !== null && node.hasPointerCapture(owner)) node.releasePointerCapture(owner);
+      };
+      cancelActionPointers.push(clear);
+      node.addEventListener('pointerdown', event => {
+        if (event.pointerType === 'mouse' || !logged || node.disabled || pointer !== null || event.button !== 0 || (id !== 'center' && !overlayOn)) return;
+        event.preventDefault();
+        pointer = event.pointerId;
+        cancelled = false;
+        startX = event.clientX;
+        startY = event.clientY;
+        node.setPointerCapture(pointer);
+        node.classList.add('pressed');
+      });
+      node.addEventListener('pointermove', event => {
+        if (event.pointerId !== pointer) return;
+        if (Math.hypot(event.clientX - startX, event.clientY - startY) > 16) {
+          cancelled = true;
+          node.classList.remove('pressed');
+        }
+      });
+      node.addEventListener('pointerup', event => {
+        if (event.pointerId !== pointer) return;
+        event.preventDefault();
+        lastTouch = performance.now();
+        const rect = node.getBoundingClientRect();
+        const activate = !cancelled && logged && !node.disabled && event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+        clear();
+        if (activate) action();
+      });
+      ['pointercancel', 'lostpointercapture'].forEach(type => node.addEventListener(type, event => {
+        if (event.pointerId === pointer) clear();
+      }));
+      node.addEventListener('contextmenu', event => event.preventDefault());
+      node.onclick = event => {
+        if (event.pointerType && event.pointerType !== 'mouse') return;
+        if (event.detail > 0 && event.pointerType !== 'mouse' && performance.now() - lastTouch < 800) return;
+        if (logged && !node.disabled && (id === 'center' || overlayOn)) action();
+      };
+    }
+
+    bindAction('drag', async () => {
+      if (dragLocked) {
+        await releaseDrag();
+        return;
+      }
+      setDragging(true);
+      const result = await enqueueInput('/button', { action: 'down' });
+      if (!result) setDragging(false);
+      else if (dragLocked) holdTimer = setTimeout(renewHold, 1000);
+    });
+
+    async function renewHold() {
+      if (!logged || !dragLocked || document.hidden || holdBusy) return;
+      holdBusy = true;
+      try {
+        const state = await api('/hold', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (state.held === false && dragLocked) {
+          emergencyRelease();
+          setConnection('拖动已安全释放');
+        }
+      } catch (_) { emergencyRelease(); }
+      finally {
+        holdBusy = false;
+        if (logged && dragLocked && !document.hidden) holdTimer = setTimeout(renewHold, 1000);
+      }
+    }
+
+    function sendRelease() {
+      const epoch = inputEpoch;
+      fetch('/release', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+        keepalive: true
+      }).then(response => {
+        if (response.ok && epoch === inputEpoch && !dragLocked) remoteButtonDown = false;
+      }).catch(() => {});
+    }
+
+    function emergencyRelease() {
+      cancelActionPointers.forEach(cancel => cancel());
+      clearInputQueue();
+      stopDirections();
+      stopPad();
+      if (!dragLocked && !remoteButtonDown) return;
+      setDragging(false);
+      sendRelease();
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        emergencyRelease();
+        stopTracking();
+      } else resumeTracking();
+    });
+    window.addEventListener('pagehide', emergencyRelease);
+    window.addEventListener('blur', emergencyRelease);
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') emergencyRelease(); });
+    bindAction('click', () => enqueueInput('/button', { action: 'click' }));
+    bindAction('doubleClick', () => enqueueInput('/button', { action: 'dblclick' }));
+    bindAction('rightClick', () => enqueueInput('/button', { action: 'rightclick' }));
+    bindAction('center', () => {
+      enqueueInput('/move', { mode: 'absolute', nx: .5, ny: .5 });
+    });
+    bindAction('scrollUp', () => enqueueInput('/wheel', { delta: 360 }));
+    bindAction('scrollDown', () => enqueueInput('/wheel', { delta: -360 }));
+
+
+    function clamp01(value) { return Math.max(0, Math.min(1, value)); }
+
+    function noteActivity() {
+      const wasIdle = performance.now() - lastActivity >= 1500;
+      lastActivity = performance.now();
+      if (wasIdle && logged && previewOn && !document.hidden && !previewBusy) {
+        clearTimeout(previewTimer);
+        previewTimer = setTimeout(refreshPreview, 0);
+      }
+    }
+
+    function placeMarker(id, nx, ny) {
+      const node = $(id);
+      node.style.left = `${clamp01(nx) * 100}%`;
+      node.style.top = `${clamp01(ny) * 100}%`;
+      node.classList.remove('hidden');
+    }
+
+    function applyCursor(cursor, screen = null) {
+      if (screen) {
+        screenData = screen;
+        $('screenInfo').textContent = `${screen.width} × ${screen.height}`;
+      }
+      if (!screenData || !Number.isFinite(cursor?.x) || !Number.isFinite(cursor?.y)) return;
+      if (cursorData && (cursor.x !== cursorData.x || cursor.y !== cursorData.y)) noteActivity();
+      cursorData = { x: cursor.x, y: cursor.y };
+      const nx = clamp01((cursor.x - screenData.x) / Math.max(1, screenData.width - 1));
+      const ny = clamp01((cursor.y - screenData.y) / Math.max(1, screenData.height - 1));
+      placeMarker('cursorDot', nx, ny);
+      placeMarker('touchCursor', nx, ny);
+      $('cursorDot').classList.remove('stale');
+      $('cursorDot').classList.toggle('near-right', nx > .9);
+      $('cursorDot').classList.toggle('near-top', ny < .07);
+      $('modeInfo').textContent = '鼠标已同步';
+      paintPreviewCursor();
+    }
+
+    function paintPreviewCursor() {
+      if (!cursorData || !previewScreen) return;
+      placeMarker('cursorDot',
+        (cursorData.x - previewScreen.x) / Math.max(1, previewScreen.width - 1),
+        (cursorData.y - previewScreen.y) / Math.max(1, previewScreen.height - 1));
+      if (!previewCrop) return;
+      const nx = (cursorData.x - previewCrop.x) / Math.max(1, previewCrop.width - 1);
+      const ny = (cursorData.y - previewCrop.y) / Math.max(1, previewCrop.height - 1);
+      // Keep the previous frame at full brightness while a new crop arrives.
+      $('detailFrame').classList.toggle('outside', nx < 0 || nx > 1 || ny < 0 || ny > 1);
+      placeMarker('detailCursor', nx, ny);
+    }
+
+    function clearPreview() {
+      previewCrop = null;
+      previewScreen = null;
+      ['overviewImage', 'detailImage'].forEach(id => {
+        const canvas = $(id);
+        canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+        $(id).classList.add('hidden');
+      });
+      $('detailCursor').classList.add('hidden');
+      $('touchCursor').classList.add('hidden');
+      $('previewStatus').textContent = logged ? '正在获取画面' : '连接后显示';
+    }
+
+    async function pollPosition() {
+      if (!logged || document.hidden || positionBusy) return;
+      positionBusy = true;
+      const revision = cursorRevision;
+      const guidesVersion = guidesRevision;
+      const highlightVersion = highlightRevision;
+      try {
+        // Movement responses already carry the real cursor; idle reads also follow a physical mouse.
+        if (!inputBusy) {
+          const state = await api('/state');
+          if (remoteButtonDown && !dragLocked) sendRelease();
+          if (logged && !guidesBusy && guidesVersion === guidesRevision) applyGuides(state.guides);
+          if (logged && !highlightBusy && highlightVersion === highlightRevision) applyHighlight(state.highlight);
+          if (logged && !document.hidden && revision === cursorRevision) {
+            applyCursor(state.cursor, state.screen);
+            setConnection('已连接', 'ok');
+          }
+        }
+      } catch (error) {
+        if (error.status === 401) setLogged(false);
+        else {
+          $('cursorDot').classList.add('stale');
+          $('modeInfo').textContent = '位置未同步';
+          setConnection('连接异常', 'err');
+        }
+      } finally {
+        positionBusy = false;
+        if (logged && !document.hidden) positionTimer = setTimeout(pollPosition, 250);
+      }
+    }
+
+    async function refreshPreview() {
+      if (!logged || !previewOn || document.hidden || previewBusy) return;
+      previewBusy = true;
+      const epoch = previewEpoch;
+      previewAbort = new AbortController();
+      let delay = 2000;
+      try {
+        const frame = await api('/pointer-view', { signal: previewAbort.signal });
+        const overview = new Image();
+        const detail = new Image();
+        overview.src = frame.overview;
+        detail.src = frame.detail;
+        await Promise.all([overview.decode(), detail.decode()]);
+        if (epoch !== previewEpoch || !logged || !previewOn || document.hidden) return;
+        previewScreen = frame.screen;
+        previewCrop = frame.crop;
+        $('overviewFrame').style.aspectRatio = `${frame.screen.width} / ${frame.screen.height}`;
+        // Both JPEGs are decoded before the visible canvases are updated in one frame.
+        drawPreview('overviewImage', overview);
+        drawPreview('detailImage', detail);
+        fitDetail();
+        $('previewPanel').classList.remove('stale');
+        $('previewStatus').textContent = '鼠标位置';
+        paintPreviewCursor();
+        delay = performance.now() - lastActivity < 1500 ? 400 : 2000;
+      } catch (error) {
+        if (epoch !== previewEpoch) return;
+        if (error.status === 401) setLogged(false);
+        else {
+          $('previewPanel').classList.add('stale');
+          $('previewStatus').textContent = '画面暂不可用 · 仍可移动鼠标';
+          delay = 4000;
+        }
+      } finally {
+        previewBusy = false;
+        previewAbort = null;
+        if (logged && previewOn && !document.hidden) previewTimer = setTimeout(refreshPreview, epoch === previewEpoch ? delay : 0);
+      }
+    }
+
+    function stopTracking() {
+      cursorRevision++;
+      previewEpoch++;
+      clearTimeout(positionTimer);
+      clearTimeout(previewTimer);
+      clearTimeout(assistTimer);
+      positionTimer = previewTimer = null;
+      previewAbort?.abort();
+    }
+
+    function resumeTracking() {
+      if (!logged || document.hidden) return;
+      clearTimeout(positionTimer);
+      clearTimeout(previewTimer);
+      positionTimer = setTimeout(pollPosition, 0);
+      if (previewOn) previewTimer = setTimeout(refreshPreview, 0);
+      if (assistOn) {
+        clearTimeout(assistTimer);
+        assistTimer = setTimeout(pollAssist, 0);
+      }
+    }
+
+    function updatePreviewToggle() {
+      $('previewToggle').textContent = '画面';
+      $('previewToggle').setAttribute('aria-pressed', String(previewOn));
+      $('previewToggle').title = previewOn ? '隐藏鼠标附近画面' : '显示鼠标附近画面';
+      $('previewPanel').classList.toggle('hidden', !previewOn);
+      if (previewOn) fitDetail();
+    }
+
+    $('previewToggle').onclick = () => {
+      previewOn = !previewOn;
+      localStorage.setItem('pointer-preview', previewOn ? 'on' : 'off');
+      previewEpoch++;
+      clearTimeout(previewTimer);
+      previewAbort?.abort();
+      updatePreviewToggle();
+      if (previewOn && logged) {
+        previewTimer = setTimeout(refreshPreview, 0);
+      }
+    };
+
+    window.addEventListener('pagehide', stopTracking);
+    window.addEventListener('pageshow', resumeTracking);
+
+    function regionKind(item) {
+      const control = item.control || '';
+      const className = item.className || '';
+      if (['Edit', 'ComboBox', 'Spinner'].includes(control)) return 'input';
+      if (control === 'CaptionButton' || className.includes('WinCaptionButton')) return 'caption';
+      if (['Window', 'Taskbar', 'Desktop'].includes(control)) return 'frame';
+      return '';
+    }
+
+    function renderRegions(data) {
+      const layer = $('regions');
+      layer.replaceChildren();
+      if (data && data.screen) screenData = data.screen;
+      const items = (data && data.items) || [];
+      const screen = screenData;
+      if (!screen || !screen.width || !screen.height) return;
+      items.forEach(item => {
+        if (item.control === 'Desktop') return;
+        const left = clamp01((item.x - screen.x) / screen.width) * 100;
+        const top = clamp01((item.y - screen.y) / screen.height) * 100;
+        const width = Math.max(.3, item.width / screen.width * 100);
+        const height = Math.max(.3, item.height / screen.height * 100);
+        const node = document.createElement('div');
+        node.className = `region ${regionKind(item)}`.trim();
+        node.style.left = `${left}%`;
+        node.style.top = `${top}%`;
+        node.style.width = `${Math.min(100 - left, width)}%`;
+        node.style.height = `${Math.min(100 - top, height)}%`;
+        layer.appendChild(node);
+      });
+      $('assistInfo').textContent = items.length ? `${items.length} 个区域` : '暂无区域';
+    }
+
+    function applyAssist(state) {
+      assistOn = Boolean(state.enabled);
+      $('assist').textContent = assistOn ? '关闭区域' : '显示区域';
+      $('assist').setAttribute('aria-pressed', String(assistOn));
+      if (state.data && state.revision !== assistRevision) {
+        assistRevision = state.revision;
+        renderRegions(state.data);
+      }
+      if (state.lastError) $('assistInfo').textContent = '识别失败';
+      else if (assistOn && state.scanning) $('assistInfo').textContent = '更新中';
+      else if (!assistOn) $('assistInfo').textContent = '关闭';
+    }
+
+    async function pollAssist() {
+      if (!assistOn || !logged || document.hidden || assistBusy) return;
+      assistBusy = true;
+      try { applyAssist(await api('/assist')); }
+      catch (_) { $('assistInfo').textContent = '连接异常'; }
+      finally {
+        assistBusy = false;
+        if (assistOn && logged && !document.hidden) assistTimer = setTimeout(pollAssist, 300);
+      }
+    }
+
+    $('assist').onclick = async () => {
+      const next = !assistOn;
+      const state = await post('/assist', { enabled: next });
+      if (!state) return;
+      applyAssist(state);
+      clearTimeout(assistTimer);
+      assistTimer = null;
+      if (next) assistTimer = setTimeout(pollAssist, 250);
+      else {
+        assistRevision = -1;
+        $('regions').replaceChildren();
+      }
+    };
+
+    $('loginForm').addEventListener('submit', async event => {
+      event.preventDefault();
+      $('loginError').textContent = '';
+      try {
+        await api('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: $('password').value })
+        });
+        $('password').value = '';
+        await loadState();
+      } catch (_) {
+        $('loginError').textContent = '密码错误或未配置';
+      }
+    });
+
+    $('logout').onclick = async () => {
+      await releaseDrag();
+      if (assistOn) await post('/assist', { enabled: false });
+      await fetch('/logout', { method: 'POST', credentials: 'same-origin' });
+      clearTimeout(assistTimer);
+      assistOn = false;
+      $('regions').replaceChildren();
+      setLogged(false);
+      $('password').focus();
+    };
+
+    async function loadState() {
+      try {
+        const state = await api('/state');
+        setLogged(true);
+        applyGuides(state.guides);
+        applyHighlight(state.highlight);
+        applyCursor(state.cursor, state.screen);
+      } catch (_) {
+        setLogged(false);
+      }
+    }
+
+    function drawPreview(id, bitmap) {
+      const canvas = $(id);
+      if (canvas.width !== bitmap.naturalWidth) canvas.width = bitmap.naturalWidth;
+      if (canvas.height !== bitmap.naturalHeight) canvas.height = bitmap.naturalHeight;
+      canvas.getContext('2d', { alpha: false }).drawImage(bitmap, 0, 0);
+      canvas.classList.remove('hidden');
+    }
+
+    function fitDetail() {
+      const stage = $('detailStage');
+      const ratio = previewCrop ? previewCrop.width / previewCrop.height : 12 / 7;
+      const width = Math.min(stage.clientWidth, stage.clientHeight * ratio);
+      $('detailFrame').style.width = `${width}px`;
+      $('detailFrame').style.height = `${width / ratio}px`;
+    }
+
+    new ResizeObserver(fitDetail).observe($('detailStage'));
+    window.addEventListener('resize', emergencyRelease);
+    updatePadMode(padMode);
+    updateOverlayToggle();
+    updatePreviewToggle();
+    setLogged(false);
+    loadState();
+  </script>
+</body>
+</html>
