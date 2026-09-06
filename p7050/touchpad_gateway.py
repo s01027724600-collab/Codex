@@ -25,7 +25,7 @@ except ImportError:
     Image = ImageGrab = None
 
 APP_NAME = "claude-code-gateway-touchpad"
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 SESSION_COOKIE = "gateway_session"
 
 

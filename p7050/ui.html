@@ -87,7 +87,9 @@ main { position:relative; min-height:0; }
 .mode-switch button { flex:1; min-height:36px; border:0; border-radius:7px; background:transparent; color:var(--muted); font-size:13px; }
 .mode-switch button[aria-pressed="true"] { background:#fff; color:var(--text); box-shadow:0 1px 3px #0001; }
 .speed-row { display:block; margin:16px 0; font-size:12px; color:var(--muted); }
-#joystickSpeed { width:100%; display:block; height:28px; margin:6px 0 0; accent-color:var(--blue); }
+.speed-row > span { display:flex; justify-content:space-between; gap:12px; }
+.speed-row output { color:var(--text); font-variant-numeric:tabular-nums; }
+.speed-row input[type="range"] { width:100%; display:block; height:28px; margin:6px 0 0; accent-color:var(--blue); }
 .action { min-height:40px; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:#fafafa; color:var(--text); font-size:13px; }
 .settings-actions { display:flex; gap:6px; }
 .assist-info { margin-top:8px; color:var(--muted); font-size:11px; }
@@ -137,7 +139,8 @@ main { position:relative; min-height:0; }
     <details class="settings"><summary>设置</summary><div class="settings-body">
       <span class="settings-label">触控方式</span>
       <div class="mode-switch" role="group" aria-label="触控方式"><button id="relativeMode" type="button" aria-pressed="false">相对移动</button><button id="absoluteMode" type="button" aria-pressed="true">位置映射</button></div>
-      <label class="speed-row">方向键速度<input id="joystickSpeed" type="range" min="30" max="150" value="85" aria-label="方向键速度"></label>
+      <label class="speed-row" for="relativeScale"><span>相对移动倍率<output id="relativeScaleValue">1.0×</output></span><input id="relativeScale" type="range" min="0" max="4" step="1" value="2" list="relativeScaleStops" aria-label="相对移动倍率" title="五个固定挡位，不使用加速曲线"><datalist id="relativeScaleStops"><option value="0"></option><option value="1"></option><option value="2"></option><option value="3"></option><option value="4"></option></datalist></label>
+      <label class="speed-row" for="joystickSpeed"><span>方向键速度</span><input id="joystickSpeed" type="range" min="30" max="150" value="85" aria-label="方向键速度"></label>
       <div class="settings-actions"><button id="center" class="action" type="button">鼠标居中</button><button id="assist" class="action" type="button" aria-pressed="false">显示区域</button></div>
       <div id="assistInfo" class="assist-info">关闭</div>
     </div></details>
@@ -183,7 +186,7 @@ main { position:relative; min-height:0; }
 <script>
 'use strict';
     const $ = id => document.getElementById(id);
-    const controls = ['absoluteMode', 'relativeMode', 'highlightToggle', 'guidesToggle', 'overlayToggle', 'dirUp', 'dirDown', 'dirLeft', 'dirRight', 'joystickSpeed', 'click', 'doubleClick', 'rightClick', 'center', 'drag', 'scrollUp', 'scrollDown', 'assist', 'previewToggle'];
+    const controls = ['absoluteMode', 'relativeMode', 'highlightToggle', 'guidesToggle', 'overlayToggle', 'dirUp', 'dirDown', 'dirLeft', 'dirRight', 'relativeScale', 'joystickSpeed', 'click', 'doubleClick', 'rightClick', 'center', 'drag', 'scrollUp', 'scrollDown', 'assist', 'previewToggle'];
 
     let logged = false;
     let highlightOn = false;
@@ -232,8 +235,23 @@ main { position:relative; min-height:0; }
     let previewScreen = null;
     let lastActivity = 0;
     const cancelActionPointers = [];
+    const relativeScales = [.6, .8, 1, 1.3, 1.6];
+    const savedRelativeScale = Number(localStorage.getItem('relative-scale-step'));
+    let relativeScaleStep = Number.isInteger(savedRelativeScale) && savedRelativeScale >= 0 && savedRelativeScale < relativeScales.length ? savedRelativeScale : 2;
 
+    $('relativeScale').value = relativeScaleStep;
     $('joystickSpeed').value = Math.max(30, Math.min(150, Number(localStorage.getItem('joystick-speed')) || 85));
+
+    function relativeScale() { return relativeScales[relativeScaleStep]; }
+    function paintRelativeScale() {
+      $('relativeScaleValue').value = `${relativeScale().toFixed(1)}×`;
+      $('relativeScale').disabled = !logged || padMode !== 'relative';
+    }
+    $('relativeScale').oninput = event => {
+      relativeScaleStep = Math.max(0, Math.min(relativeScales.length - 1, Math.round(Number(event.target.value))));
+      paintRelativeScale();
+    };
+    $('relativeScale').onchange = () => localStorage.setItem('relative-scale-step', String(relativeScaleStep));
 
     async function api(path, options = {}) {
       const controller = new AbortController();
@@ -345,6 +363,7 @@ main { position:relative; min-height:0; }
       $('loginLayer').classList.toggle('hidden', value);
       $('logout').classList.toggle('hidden', !value);
       controls.forEach(id => { $(id).disabled = !value; });
+      paintRelativeScale();
       paintHighlight();
       paintGuides();
       if (value) {
@@ -605,8 +624,8 @@ main { position:relative; min-height:0; }
       if (padMode === 'absolute') {
         if (dx || dy) moveAbsolute(pointer.x, pointer.y);
       } else {
-        pointer.pendingX += dx;
-        pointer.pendingY += dy;
+        pointer.pendingX += dx * relativeScale();
+        pointer.pendingY += dy * relativeScale();
         if (pointer.travel >= 6 || dragLocked) {
           const mx = Math.round(pointer.pendingX), my = Math.round(pointer.pendingY);
           pointer.pendingX -= mx;
@@ -669,6 +688,7 @@ main { position:relative; min-height:0; }
       $('pad').setAttribute('aria-label', padMode === 'relative' ? '盲触控板：滑动移动，轻点单击，双指滚动' : '盲触控板：触碰定位，轻点单击，双指滚动');
       const hint = document.querySelector('.pad-hint');
       if (hint) hint.textContent = padMode === 'relative' ? '滑动移动 · 轻点单击 · 双指滚动' : '触碰定位 · 轻点单击 · 双指滚动';
+      paintRelativeScale();
     }
     $('absoluteMode').onclick = () => updatePadMode('absolute');
     $('relativeMode').onclick = () => updatePadMode('relative');
