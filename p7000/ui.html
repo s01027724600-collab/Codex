@@ -277,6 +277,7 @@
   .confirm-card { width: min(360px,100%); padding: 22px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface-solid); box-shadow: var(--shadow-float); animation: modal-in .22s var(--ease); }
   .confirm-card h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
   .confirm-card p { margin: 7px 0 18px; color: var(--text-secondary); font-size: 13px; }
+  .confirm-option { display: flex; align-items: center; gap: 8px; margin: -6px 0 16px; color: var(--text-secondary); font-size: 13px; cursor: pointer; }
   .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
   #toast { position: fixed; left: 50%; bottom: 28px; z-index: 150; max-width: calc(100vw - 32px); padding: 10px 15px; border: 1px solid rgba(255,255,255,.13); border-radius: 999px; color: #fff; background: rgba(30,30,32,.90); box-shadow: var(--shadow-float); opacity: 0; pointer-events: none; transform: translate(-50%,10px); transition: opacity .22s ease,transform .28s var(--ease); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); font-size: 13px; white-space: nowrap; }
   #toast.show { opacity: 1; transform: translate(-50%,0); }
@@ -389,6 +390,9 @@
               <button class="button secondary" id="up">返回</button>
               <span class="selection-copy" id="selcount">0 项</span>
               <button class="button" id="download" disabled>下载</button>
+              <button class="button secondary" id="upload">上传</button>
+              <button class="button secondary" id="project-image">投放图片</button>
+              <button class="button secondary hidden" id="hide-display-files">结束投放</button>
               <button class="button plain hidden" id="clear-selection">清除</button>
             </div>
           </div>
@@ -467,10 +471,13 @@
   <div class="confirm-card">
     <h2 id="projection-title">确认投放</h2>
     <p>图片将覆盖教学机当前画面。</p>
+    <label class="confirm-option"><input type="checkbox" id="projection-fill">等比铺满全屏（小图放大，不裁剪不扭曲）</label>
     <div class="confirm-actions"><button class="button secondary" id="projection-cancel">取消</button><button class="button" id="projection-go">投放</button></div>
   </div>
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
+<input type="file" id="upload-input" multiple hidden>
+<input type="file" id="project-input" accept="image/*" hidden>
 
 <script>
   const $ = id => document.getElementById(id);
@@ -793,9 +800,51 @@
   $('modal-display').addEventListener('click',() => requestProjection(modalCurrentPath));
   function downloadOriginal(path) { if (path) location.href = '/api/file?path='+encodeURIComponent(path); }
 
+  // 平板本机上传：文件传输 + 图片投放
+  $('upload').addEventListener('click', () => $('upload-input').click());
+  $('upload-input').addEventListener('change', event => { handleUpload(event.target.files, false); event.target.value = ''; });
+  $('project-image').addEventListener('click', () => $('project-input').click());
+  $('project-input').addEventListener('change', event => { handleUpload(event.target.files, true); event.target.value = ''; });
+
+  async function uploadOne(file) {
+    const response = await fetch('/api/upload?name='+encodeURIComponent(file.name || '上传文件'), {
+      method: 'POST', body: file, credentials: 'same-origin'
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 401) showLogin();
+      const error = new Error(data.error || '上传失败');
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  }
+
+  async function handleUpload(fileList, project) {
+    const files = [...(fileList || [])];
+    if (!files.length) return;
+    let savedDir = '';
+    for (const file of files) {
+      toast((project ? '正在投放 ' : '正在上传 ') + (file.name || '文件'));
+      try {
+        const result = await uploadOne(file);
+        savedDir = result.dir || savedDir;
+        if (project && result.is_image) {
+          requestProjection(result.path);
+        } else {
+          toast('已上传：' + result.name);
+        }
+      } catch (error) {
+        toast(error.message || '上传失败');
+      }
+    }
+    if (savedDir) loadDir(savedDir);
+  }
+
   function requestProjection(path) {
     if (!path) return;
     pendingProjectionPath = path;
+    $('projection-fill').checked = false;
     $('projection-confirm').classList.remove('hidden');
     $('projection-go').focus();
   }
@@ -811,7 +860,7 @@
     const path = pendingProjectionPath;
     button.disabled = true;
     button.textContent = '投放中';
-    const ok = await showOnScreen(path);
+    const ok = await showOnScreen(path, $('projection-fill').checked);
     button.disabled = false;
     button.textContent = '投放';
     if (ok) {
@@ -821,10 +870,11 @@
     }
   });
 
-  async function showOnScreen(path) {
+  async function showOnScreen(path, fill) {
+    const url = '/api/show?path='+encodeURIComponent(path)+(fill ? '&fill=1' : '');
     try {
-      await fetchJSON('/api/show?path='+encodeURIComponent(path),{method:'POST'});
-      $('hide-display').classList.remove('hidden');
+      await fetchJSON(url,{method:'POST'});
+      setProjectionVisible(true);
       toast('已投放到教学大屏');
       return true;
     } catch (error) {
@@ -832,10 +882,19 @@
       return false;
     }
   }
-  $('hide-display').addEventListener('click',async () => {
-    try { await fetchJSON('/api/hide',{method:'POST'}); $('hide-display').classList.add('hidden'); toast('大屏投放已结束'); }
-    catch (_) { toast('暂时无法结束投放'); }
-  });
+  function setProjectionVisible(visible) {
+    $('hide-display').classList.toggle('hidden', !visible);
+    $('hide-display-files').classList.toggle('hidden', !visible);
+  }
+  async function endProjection() {
+    try {
+      await fetchJSON('/api/hide',{method:'POST'});
+      setProjectionVisible(false);
+      toast('大屏投放已结束');
+    } catch (_) { toast('暂时无法结束投放'); }
+  }
+  $('hide-display').addEventListener('click', endProjection);
+  $('hide-display-files').addEventListener('click', endProjection);
 
   $('scan-now').addEventListener('click',async event => {
     const button = event.currentTarget;
@@ -895,7 +954,7 @@
       $('shot-last').textContent = compactTime(shot.last_shot);
       $('shot-retention').textContent = shot.retention_days > 0 ? `${shot.retention_days} 天` : '永久';
       $('shot-location').textContent = shot.current_dir || shot.context_root || '未配置';
-      $('hide-display').classList.toggle('hidden',!data.display?.visible);
+      setProjectionVisible(Boolean(data.display?.visible));
     } catch (_) {
       document.querySelectorAll('[data-connection]').forEach(node => node.classList.add('offline'));
       document.querySelectorAll('[data-connection-text]').forEach(node => node.textContent = '离线');
