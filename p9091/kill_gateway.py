@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 APP_NAME = "claude-code-gateway-kill"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 SESSION_COOKIE = "gateway_session"
 SHELL_THIS_PC = "shell:this_pc"
 DESKTOP_PUBLIC = "desktop:public"
@@ -2158,8 +2158,7 @@ class KillHandler(BaseHTTPRequestHandler):
         return self.server.config
 
     def _remote(self) -> str:
-        forwarded = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        return forwarded or self.client_address[0]
+        return self.client_address[0]
 
     def _cookies(self) -> dict:
         raw = self.headers.get("Cookie", "")
@@ -2450,5 +2449,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

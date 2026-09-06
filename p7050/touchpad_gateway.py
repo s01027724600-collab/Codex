@@ -25,8 +25,37 @@ except ImportError:
     Image = ImageGrab = None
 
 APP_NAME = "claude-code-gateway-touchpad"
-VERSION = "0.2.5"
+VERSION = "0.2.7"
 SESSION_COOKIE = "gateway_session"
+
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_WHEEL = 0x0800
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_ABSOLUTE = 0x8000
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _anonymous_ = ("union",)
+    _fields_ = [("type", wintypes.DWORD), ("union", _INPUTUNION)]
 
 
 def load_json(path: str) -> dict:
@@ -469,6 +498,8 @@ class PointerController:
         if os.name != "nt":
             raise RuntimeError("7050 touchpad control only supports Windows")
         self.user32 = ctypes.windll.user32
+        self.user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
+        self.user32.SendInput.restype = wintypes.UINT
         try:
             if not self.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
                 self.user32.SetProcessDPIAware()
@@ -526,6 +557,17 @@ class PointerController:
         self.user32.GetCursorPos(ctypes.byref(point))
         return {"x": int(point.x), "y": int(point.y)}
 
+    def _send_mouse(self, *events: tuple) -> None:
+        inputs = (_INPUT * len(events))()
+        for index, event in enumerate(events):
+            flags, dx, dy, data = event
+            inputs[index].type = 0
+            inputs[index].mi = _MOUSEINPUT(
+                int(dx), int(dy), int(data) & 0xFFFFFFFF, int(flags), 0, 0)
+        sent = int(self.user32.SendInput(len(inputs), inputs, ctypes.sizeof(_INPUT)))
+        if sent != len(inputs):
+            raise OSError(f"SendInput injected {sent} of {len(inputs)} mouse events")
+
     def absolute_point(self, nx: float, ny: float) -> tuple:
         screen = self.screen()
         nx = max(0.0, min(1.0, float(nx)))
@@ -536,17 +578,27 @@ class PointerController:
 
     def move_absolute(self, nx: float, ny: float) -> dict:
         with self._input_lock:
-            x, y = self.absolute_point(nx, ny)
-            self.user32.SetCursorPos(x, y)
+            nx = max(0.0, min(1.0, float(nx)))
+            ny = max(0.0, min(1.0, float(ny)))
+            self._send_mouse((MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE |
+                              MOUSEEVENTF_VIRTUALDESK,
+                              round(nx * 65535), round(ny * 65535), 0))
             cursor = self.cursor()
         return {"ok": True, **cursor}
 
     def move_relative(self, dx: float, dy: float, sensitivity: float) -> dict:
         with self._input_lock:
             cursor = self.cursor()
-            x = int(cursor["x"] + float(dx) * float(sensitivity))
-            y = int(cursor["y"] + float(dy) * float(sensitivity))
-            self.user32.SetCursorPos(x, y)
+            screen = self.screen()
+            x = max(screen["x"], min(screen["x"] + screen["width"] - 1,
+                                     round(cursor["x"] + float(dx) * float(sensitivity))))
+            y = max(screen["y"], min(screen["y"] + screen["height"] - 1,
+                                     round(cursor["y"] + float(dy) * float(sensitivity))))
+            nx = (x - screen["x"]) / max(1, screen["width"] - 1)
+            ny = (y - screen["y"]) / max(1, screen["height"] - 1)
+            self._send_mouse((MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE |
+                              MOUSEEVENTF_VIRTUALDESK,
+                              round(nx * 65535), round(ny * 65535), 0))
             cursor = self.cursor()
         return {"ok": True, **cursor}
 
@@ -558,44 +610,47 @@ class PointerController:
 
     def button(self, action: str) -> dict:
         with self._input_lock:
-            event = self.user32.mouse_event
-            left_down = 0x0002
-            left_up = 0x0004
-            right_down = 0x0008
-            right_up = 0x0010
             if action == "down":
-                event(left_down, 0, 0, 0, 0)
+                self._send_mouse((MOUSEEVENTF_LEFTDOWN, 0, 0, 0))
                 self._held = True
                 self._hold_deadline = time.monotonic() + 4.0
             elif action == "up":
-                event(left_up, 0, 0, 0, 0)
+                self._send_mouse((MOUSEEVENTF_LEFTUP, 0, 0, 0))
                 self._held = False
             elif action == "click":
-                event(left_down, 0, 0, 0, 0)
-                event(left_up, 0, 0, 0, 0)
+                self._send_mouse(
+                    (MOUSEEVENTF_LEFTDOWN, 0, 0, 0),
+                    (MOUSEEVENTF_LEFTUP, 0, 0, 0),
+                )
             elif action == "dblclick":
                 for _ in range(2):
-                    event(left_down, 0, 0, 0, 0)
-                    event(left_up, 0, 0, 0, 0)
+                    self._send_mouse(
+                        (MOUSEEVENTF_LEFTDOWN, 0, 0, 0),
+                        (MOUSEEVENTF_LEFTUP, 0, 0, 0),
+                    )
                     time.sleep(0.04)
             elif action == "rightclick":
-                event(right_down, 0, 0, 0, 0)
-                event(right_up, 0, 0, 0, 0)
+                self._send_mouse(
+                    (MOUSEEVENTF_RIGHTDOWN, 0, 0, 0),
+                    (MOUSEEVENTF_RIGHTUP, 0, 0, 0),
+                )
             else:
                 raise ValueError("unknown button action")
         return {"ok": True, "action": action}
 
     def release_buttons(self) -> dict:
         with self._input_lock:
-            self.user32.mouse_event(0x0004, 0, 0, 0, 0)
-            self.user32.mouse_event(0x0010, 0, 0, 0, 0)
+            self._send_mouse(
+                (MOUSEEVENTF_LEFTUP, 0, 0, 0),
+                (MOUSEEVENTF_RIGHTUP, 0, 0, 0),
+            )
             self._held = False
             self._hold_deadline = 0.0
         return {"ok": True}
 
     def wheel(self, delta: int) -> dict:
         with self._input_lock:
-            self.user32.mouse_event(0x0800, 0, 0, int(delta), 0)
+            self._send_mouse((MOUSEEVENTF_WHEEL, 0, 0, int(delta)))
         return {"ok": True, "delta": int(delta)}
 
 
@@ -695,8 +750,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.pointer
 
     def _remote(self) -> str:
-        forwarded = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        return forwarded or self.client_address[0]
+        return self.client_address[0]
 
     def _cookies(self) -> dict:
         out = {}
