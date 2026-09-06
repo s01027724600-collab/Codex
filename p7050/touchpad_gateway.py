@@ -25,7 +25,7 @@ except ImportError:
     Image = ImageGrab = None
 
 APP_NAME = "claude-code-gateway-touchpad"
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 SESSION_COOKIE = "gateway_session"
 
 
@@ -695,8 +695,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.pointer
 
     def _remote(self) -> str:
-        forwarded = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        return forwarded or self.client_address[0]
+        return self.client_address[0]
 
     def _cookies(self) -> dict:
         out = {}

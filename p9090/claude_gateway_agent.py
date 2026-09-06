@@ -38,7 +38,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 
 APP_NAME = "claude-code-gateway"
-VERSION = "0.1.3"
+VERSION = "0.1.5"
 SESSION_COOKIE = "gateway_session"
 PASSWORD_ALGORITHM = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 260000
@@ -396,8 +396,8 @@ def verify_password_hash(password: str, encoded: str) -> bool:
 def write_password_file(path: str) -> None:
     first = getpass.getpass("Gateway password: ")
     second = getpass.getpass("Confirm password: ")
-    if len(first) < 4:
-        raise SystemExit("Password must be at least 4 characters.")
+    if len(first) < 6:
+        raise SystemExit("Password must be at least 6 characters.")
     if first != second:
         raise SystemExit("Passwords did not match.")
     data = {
@@ -1296,14 +1296,15 @@ class JobManager:
             return
         if is_windows():
             try:
-                subprocess.run(
+                completed = subprocess.run(
                     ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=False,
                     **hidden_subprocess_kwargs(),
                 )
-                return
+                if completed.returncode == 0 or proc.poll() is not None:
+                    return
             except Exception:
                 pass
         try:
@@ -1569,8 +1570,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         return self.server.audit  # type: ignore[attr-defined]
 
     def _remote(self) -> str:
-        forwarded = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        return forwarded or self.client_address[0]
+        return self.client_address[0]
 
     def _cookies(self) -> Dict[str, str]:
         result: Dict[str, str] = {}
@@ -1693,6 +1693,16 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
             return None
         return max(minimum, min(value, maximum))
 
+    def _cors_headers(self) -> Dict[str, str]:
+        origin = self.headers.get("Origin", "").strip()
+        if not origin or origin not in self.config.cors_origins:
+            return {}
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+
     def _send_json(
         self,
         data: Dict[str, object],
@@ -1702,10 +1712,9 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, X-Gateway-Token, Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        for key, value in (extra_headers or {}).items():
+        headers = self._cors_headers()
+        headers.update(extra_headers or {})
+        for key, value in headers.items():
             self.send_header(key, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -1721,9 +1730,12 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, X-Gateway-Token, Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        cors_headers = self._cors_headers()
+        for key, value in cors_headers.items():
+            self.send_header(key, value)
+        if cors_headers:
+            self.send_header("Access-Control-Allow-Headers", "Authorization, X-Gateway-Token, Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
     def do_GET(self) -> None:

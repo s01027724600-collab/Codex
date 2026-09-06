@@ -107,9 +107,9 @@ class PointerPreviewTests(unittest.TestCase):
                 with urllib.request.urlopen(url) as response:
                     self.assertEqual(json.load(response), {"ok": True})
                     self.assertEqual(response.headers["Cache-Control"], "no-store")
-                request = urllib.request.Request(url, headers={"X-Forwarded-For": "192.0.2.1"})
-                with self.assertRaises(urllib.error.HTTPError) as raised:
-                    urllib.request.urlopen(request)
+                with patch.object(Handler, "_remote", return_value="192.0.2.1"):
+                    with self.assertRaises(urllib.error.HTTPError) as raised:
+                        urllib.request.urlopen(url)
                 self.assertEqual(raised.exception.code, 401)
             with patch.object(server.pointer_preview, "snapshot", side_effect=RuntimeError("desktop unavailable")):
                 with self.assertRaises(urllib.error.HTTPError) as raised:

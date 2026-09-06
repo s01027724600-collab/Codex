@@ -88,14 +88,14 @@ function Ensure-Auth {
   }
   if ($TestMode) { $password = 'Test-' + [guid]::NewGuid().ToString('N') }
   else {
-    Write-Host 'Set one browser password for 9090 / 9091 / 7050. It is NOT an API key.'
+    Write-Host 'Set one browser password for 7000 / 7050 / 9090 / 9091. It is NOT an API key.'
     do {
-      $secure = Read-Host 'Password (at least 4 characters)' -AsSecureString
+      $secure = Read-Host 'Password (at least 6 characters)' -AsSecureString
       $again = Read-Host 'Confirm password' -AsSecureString
       $password = [Net.NetworkCredential]::new('', $secure).Password
       $confirmation = [Net.NetworkCredential]::new('', $again).Password
-      $valid = $password.Length -ge 4 -and $password -ceq $confirmation
-      if (-not $valid) { Write-Host 'Passwords differ or are too short. Please try again.' }
+      $valid = $password.Length -ge 6 -and $password -ceq $confirmation
+      if (-not $valid) { Write-Host 'Passwords differ or are shorter than 6 characters. Please try again.' }
     } until ($valid)
   }
   $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -198,7 +198,7 @@ function Test-Health([int]$Port) {
   if (-not $response.ok -or $response.app -ne $entry.app -or $response.version -ne $entry.version) { throw "Port $actual is not the expected current service." }
   $ui = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$actual/" -TimeoutSec 5
   if ($ui.StatusCode -ne 200 -or [string]$ui.Content -notmatch '<html') { throw "Port $actual UI is unavailable." }
-  if ($script:NewPassword -and $Port -ne 7000) {
+  if ($script:NewPassword) {
     $body = @{password=$script:NewPassword} | ConvertTo-Json -Compress
     $login = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$actual/login" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 10
     if ($login.StatusCode -ne 200 -or -not $login.Headers['Set-Cookie']) { throw "Port $actual browser login failed." }
@@ -219,7 +219,7 @@ function Start-One([int]$Port) {
   $arguments = @('--host','0.0.0.0','--port',[string]$actual)
   if ($TestMode) { $arguments[1] = '127.0.0.1' }
   if ($Port -ne 9091) { $arguments += @('--config',(Join-Path $StateRoot "p$Port.json")) }
-  if ($Port -ne 7000) { $arguments += @('--auth-file',$AuthFile) }
+  $arguments += @('--auth-file',$AuthFile)
   if ($Port -eq 9090) { $arguments += @('--state-dir',(Join-Path $StateRoot 'state9090'),'--workdir',(Join-Path $StateRoot 'work'),'--claude-bin',(Join-Path $Root 'claude-code\claude.exe')) }
   $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
   $outLog = Join-Path $StateRoot "logs\$actual-$stamp.out.log"
@@ -271,9 +271,9 @@ function Set-Firewall {
     $name = "TeachingGateway-TCP-$port"
     $rule = Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
     if ($rule) {
-      Set-NetFirewallRule -Name $name -Enabled True -Action Allow -Direction Inbound -Profile Any | Out-Null
+      Set-NetFirewallRule -Name $name -Enabled True -Action Allow -Direction Inbound -Profile Domain,Private | Out-Null
       $rule | Get-NetFirewallPortFilter | Set-NetFirewallPortFilter -Protocol TCP -LocalPort $port | Out-Null
-    } else { New-NetFirewallRule -Name $name -DisplayName $name -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any | Out-Null }
+    } else { New-NetFirewallRule -Name $name -DisplayName $name -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Domain,Private | Out-Null }
     $check = Get-NetFirewallRule -Name $name
     if ($check.Enabled -ne 'True' -or $check.Action -ne 'Allow') { throw "Firewall rule verification failed for $port." }
   }
