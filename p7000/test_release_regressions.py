@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import json
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -15,6 +16,86 @@ import course_monitor as app
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_system_controls_use_only_allowlisted_virtual_keys(self):
+        user32 = Mock()
+        controls = app.SystemControls(user32)
+        result = controls.invoke('presentation_current')
+        self.assertEqual(result['label'], '从当前页放映')
+        self.assertEqual(
+            [call.args for call in user32.keybd_event.call_args_list],
+            [(0x10, 0, 0, 0), (0x74, 0, 0, 0),
+             (0x74, 0, 2, 0), (0x10, 0, 2, 0)],
+        )
+        with self.assertRaisesRegex(ValueError, '不支持'):
+            controls.invoke('run-arbitrary-command')
+
+    def test_legacy_config_is_upgraded_to_scan_ppt_pptx_and_pdf(self):
+        config = app.Config(extensions=['.pptx'])
+        self.assertEqual(config.extensions, ['.pptx', '.pdf', '.ppt'])
+
+    def test_scan_finds_legacy_ppt_and_reports_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'usb'
+            target = root / 'courses'
+            state = app.State(str(root / 'state'))
+            source.mkdir()
+            (source / 'legacy.PPT').write_bytes(b'legacy presentation')
+            monitor = app.Monitor(app.Config(target_root=str(target), state_dir=str(root / 'state')), state)
+            with patch.object(app, 'list_removable_drives', return_value=[(str(source), '课堂U盘')]):
+                self.assertTrue(monitor.scan_once())
+            archived = target / '课堂U盘的课件' / 'legacy.PPT'
+            self.assertEqual(archived.read_bytes(), b'legacy presentation')
+            status = monitor.scan_status_json()
+            self.assertFalse(status['running'])
+            self.assertEqual((status['checked'], status['copied']), (1, 1))
+            self.assertFalse(status['error'])
+
+    def test_manual_scan_is_queued_when_a_scan_is_busy(self):
+        state = Mock()
+        monitor = app.Monitor(app.Config(), state)
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        def scan():
+            calls.append(1)
+            if len(calls) == 1:
+                entered.set()
+                self.assertTrue(release.wait(2))
+
+        monitor._perform_scan = scan
+        self.assertEqual(monitor.start_scan_async(), {'started': True, 'queued': False})
+        self.assertTrue(entered.wait(2))
+        self.assertEqual(monitor.start_scan_async(), {'started': False, 'queued': True})
+        self.assertTrue(monitor.scan_status_json()['queued'])
+        release.set()
+        deadline = app.time.monotonic() + 2
+        while monitor._scan_lock.locked() and app.time.monotonic() < deadline:
+            app.time.sleep(.01)
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(monitor._scan_lock.locked())
+        state.flush_file_index.assert_called_once()
+
+    def test_touchpad_restart_request_is_scoped_to_auth_state_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = app.Config(
+                auth_file=str(root / 'auth.json'),
+                target_root=str(root / 'courses'),
+                context_root=str(root / 'shots'),
+                state_dir=str(root / 'state7000'),
+            )
+            state = app.State(config.state_dir)
+            server = app.MonitorServer.__new__(app.MonitorServer)
+            server.config, server.state = config, state
+            result = server.request_touchpad_restart()
+            marker = root / 'restart-7050.request'
+            self.assertTrue(result['requested'])
+            request = json.loads(marker.read_text(encoding='utf-8'))
+            self.assertIn('requested_at', request)
+            self.assertEqual(len(request['request_id']), 16)
+            self.assertIn('快速重启 7050', state.snapshot_log()[-1]['message'])
+
     def test_capture_runs_and_frees_gdi_on_success_and_failure(self):
         for copied in (True, False):
             user, gdi = Mock(), Mock()
@@ -67,7 +148,6 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(app.fit_size(1000, 2000, 1920, 1080), (540, 1080))
 
     def test_tablet_upload_streams_to_transfer_folder_without_overwrite(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as directory:
             config = app.Config(
                 target_root=str(Path(directory) / 'courses'),
@@ -84,7 +164,6 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(Path(first['directory']).name, '平板传输')
 
     def test_interrupted_tablet_upload_leaves_no_partial_file(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as directory:
             config = app.Config(
                 target_root=str(Path(directory) / 'courses'),
@@ -112,6 +191,10 @@ class ReleaseTests(unittest.TestCase):
             encoding='utf-8-sig')
         self.assertIn('id="login-form"', ui)
         self.assertIn("fetchJSON('/login'", ui)
+        self.assertIn('id="restart-touchpad"', ui)
+        self.assertIn("fetchJSON('/api/restart-touchpad'", ui)
+        self.assertIn('data-tab="controls"', ui)
+        self.assertIn("fetchJSON('/api/control'", ui)
         self.assertIn("$arguments += @('--auth-file',$AuthFile)", runtime)
         self.assertNotIn("if ($Port -ne 7000) { $arguments += @('--auth-file'", runtime)
         self.assertIn('$password.Length -ge 6', runtime)
@@ -136,9 +219,12 @@ class ReleaseTests(unittest.TestCase):
             'size_h': '3B', 'is_image': False,
         }
         monitor = Mock()
-        monitor.start_scan_async.return_value = True
+        monitor.start_scan_async.return_value = {'started': True, 'queued': False}
         server = app.MonitorServer(
             ('127.0.0.1', 0), config, Mock(), monitor, Mock(), filestore, Mock())
+        server.system_controls = Mock()
+        server.system_controls.invoke.return_value = {
+            'ok': True, 'action': 'volume_up', 'label': '音量提高'}
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         root_url = f'http://127.0.0.1:{server.server_address[1]}'
@@ -163,6 +249,13 @@ class ReleaseTests(unittest.TestCase):
                 scan = urllib.request.Request(root_url + '/api/scan', data=b'', method='POST')
                 with opener.open(scan) as response:
                     self.assertTrue(json.load(response)['started'])
+                control = urllib.request.Request(
+                    root_url + '/api/control',
+                    data=json.dumps({'action': 'volume_up'}).encode(),
+                    headers={'Content-Type': 'application/json'}, method='POST')
+                with opener.open(control) as response:
+                    self.assertEqual(json.load(response)['label'], '音量提高')
+                server.system_controls.invoke.assert_called_once_with('volume_up')
                 upload = urllib.request.Request(
                     root_url + '/api/upload?name=notes.txt', data=b'abc', method='POST')
                 with opener.open(upload) as response:

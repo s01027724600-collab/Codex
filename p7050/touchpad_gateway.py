@@ -8,6 +8,7 @@ import ipaddress
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -25,7 +26,7 @@ except ImportError:
     Image = ImageGrab = None
 
 APP_NAME = "claude-code-gateway-touchpad"
-VERSION = "0.2.8"
+VERSION = "0.3.2"
 SESSION_COOKIE = "gateway_session"
 
 MOUSEEVENTF_MOVE = 0x0001
@@ -63,6 +64,14 @@ def load_json(path: str) -> dict:
         return json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
+
+
+def clamp_sensitivity(value, fallback: float = 1.35) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = float(fallback)
+    return max(1.0, min(5.0, parsed))
 
 
 def app_dir() -> Path:
@@ -502,6 +511,8 @@ class PointerController:
         self.user32.SendInput.restype = wintypes.UINT
         self.user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
         self.user32.SetCursorPos.restype = wintypes.BOOL
+        self.user32.ClipCursor.argtypes = [ctypes.c_void_p]
+        self.user32.ClipCursor.restype = wintypes.BOOL
         try:
             if not self.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
                 self.user32.SetProcessDPIAware()
@@ -608,6 +619,12 @@ class PointerController:
         remains in use for buttons and the wheel, where real input semantics are
         required.
         """
+        # PowerPoint slide show and a few full-screen applications can leave a
+        # stale ClipCursor rectangle behind while their window is closing. A
+        # physical touch clears that state, which explains the field symptom.
+        # The remote touchpad owns pointer navigation, so release confinement
+        # before every requested move instead of waiting for a physical touch.
+        self.user32.ClipCursor(None)
         if not self.user32.SetCursorPos(int(x), int(y)):
             error = getattr(ctypes, "get_last_error", lambda: 0)()
             raise OSError(error, f"SetCursorPos failed at ({int(x)}, {int(y)})")
@@ -673,19 +690,24 @@ class PointerPreview:
         self._last_attempt = 0.0
         self._cached = None
         self._last_error = ""
-        self._min_interval = 1.0 / 3.0
+        # Local Wi-Fi can comfortably carry these small JPEG previews. The old
+        # 3 fps cap, plus a 400 ms client timer, made the preview feel slower
+        # than the pointer even when the network was idle.
+        self._min_interval = 1.0 / 6.0
         self._crop = None
         self._crop_screen = None
+        self._overview_data = None
+        self._overview_at = 0.0
 
     @staticmethod
-    def _jpeg(image) -> str:
+    def _jpeg(image, quality: int = 65) -> str:
         with io.BytesIO() as buffer:
-            image.save(buffer, format="JPEG", quality=65)
+            image.save(buffer, format="JPEG", quality=quality, optimize=True)
             return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
     def _detail_crop(self, screen: dict, cursor: dict) -> dict:
-        width = min(720, screen["width"])
-        height = min(420, screen["height"])
+        width = min(960, screen["width"])
+        height = min(540, screen["height"])
         previous = self._crop if self._crop_screen == screen else None
         left = cursor["x"] - width // 2
         top = cursor["y"] - height // 2
@@ -702,7 +724,15 @@ class PointerPreview:
             "height": height,
         }
 
-    def snapshot(self) -> dict:
+    @staticmethod
+    def _response(result: dict, include_overview: bool) -> dict:
+        if include_overview:
+            return result
+        compact = dict(result)
+        compact.pop("overview", None)
+        return compact
+
+    def snapshot(self, include_overview: bool = True) -> dict:
         if ImageGrab is None:
             raise RuntimeError("pointer preview requires Pillow")
         with self._lock:
@@ -710,8 +740,9 @@ class PointerPreview:
                 if self._last_error:
                     raise RuntimeError(self._last_error)
                 if self._cached is not None:
-                    return self._cached
-            self._last_attempt = time.monotonic()
+                    return self._response(self._cached, include_overview)
+            now = time.monotonic()
+            self._last_attempt = now
             try:
                 screen = self.pointer.screen()
                 with ImageGrab.grab(all_screens=True) as desktop:
@@ -722,14 +753,16 @@ class PointerPreview:
                     left = crop["x"] - screen["x"]
                     top = crop["y"] - screen["y"]
                     with desktop.crop((left, top, left + crop["width"], top + crop["height"])) as detail:
-                        detail_data = self._jpeg(detail)
-                    desktop.thumbnail((480, 300), Image.Resampling.BILINEAR)
-                    overview_data = self._jpeg(desktop)
+                        detail_data = self._jpeg(detail, quality=67)
+                    if self._overview_data is None or now - self._overview_at >= 1.0:
+                        desktop.thumbnail((512, 288), Image.Resampling.BILINEAR)
+                        self._overview_data = self._jpeg(desktop, quality=55)
+                        self._overview_at = now
                 result = {
                     "ok": True,
                     "screen": screen,
                     "cursor": cursor,
-                    "overview": overview_data,
+                    "overview": self._overview_data,
                     "detail": detail_data,
                     "crop": crop,
                     "capturedAt": int(time.time() * 1000),
@@ -738,7 +771,7 @@ class PointerPreview:
                 self._crop = crop
                 self._crop_screen = screen.copy()
                 self._last_error = ""
-                return result
+                return self._response(result, include_overview)
             except Exception as exc:
                 self._cached = None
                 self._last_error = str(exc)
@@ -747,6 +780,14 @@ class PointerPreview:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
+    protocol_version = "HTTP/1.1"
+
+    def setup(self) -> None:
+        super().setup()
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
 
     def log_message(self, format: str, *args) -> None:
         return
@@ -863,7 +904,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/pointer-view":
             try:
-                self._send_json(self.server.pointer_preview.snapshot())
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                include_overview = query.get("overview", ["1"])[0] != "0"
+                self._send_json(self.server.pointer_preview.snapshot(include_overview))
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, 503)
             return
@@ -928,10 +971,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/move":
                 if body.get("mode") == "relative":
+                    sensitivity = clamp_sensitivity(
+                        body.get("sensitivity"), self.config.get("sensitivity", 1.35) or 1.35)
                     result = self.pointer.move_relative(
                         float(body.get("dx", 0) or 0),
                         float(body.get("dy", 0) or 0),
-                        float(self.config.get("sensitivity", 1.35) or 1.35),
+                        sensitivity,
                     )
                 else:
                     result = self.pointer.move_absolute(
@@ -992,6 +1037,7 @@ def main() -> int:
         print(f"[7050] WARNING: no password hash loaded from {auth_file}")
 
     server = ThreadingHTTPServer((host, port), Handler)
+    server.daemon_threads = True
     server.config = config
     base_dir = app_dir()
     server.scan_worker = UiaScanWorker(

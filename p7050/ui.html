@@ -86,6 +86,10 @@ main { position:relative; min-height:0; }
 .mode-switch { display:flex; gap:4px; padding:3px; background:#ededf1; border-radius:9px; }
 .mode-switch button { flex:1; min-height:36px; border:0; border-radius:7px; background:transparent; color:var(--muted); font-size:13px; }
 .mode-switch button[aria-pressed="true"] { background:#fff; color:var(--text); box-shadow:0 1px 3px #0001; }
+.mode-switch + .settings-label { margin-top:14px; }
+.speed-levels { display:grid; grid-template-columns:repeat(5,1fr); gap:4px; margin:0 0 12px; }
+.speed-levels button { min-height:34px; border:0; border-radius:8px; color:var(--muted); background:#ededf1; font-weight:650; }
+.speed-levels button[aria-pressed="true"] { color:#fff; background:var(--blue); box-shadow:0 2px 7px #007aff45; }
 .speed-row { display:block; margin:16px 0; font-size:12px; color:var(--muted); }
 .speed-row > span { display:flex; justify-content:space-between; gap:12px; }
 .speed-row output { color:var(--text); font-variant-numeric:tabular-nums; }
@@ -139,8 +143,9 @@ main { position:relative; min-height:0; }
     <details class="settings"><summary>设置</summary><div class="settings-body">
       <span class="settings-label">触控方式</span>
       <div class="mode-switch" role="group" aria-label="触控方式"><button id="relativeMode" type="button" aria-pressed="false">相对移动</button><button id="absoluteMode" type="button" aria-pressed="true">位置映射</button></div>
-      <label class="speed-row" for="relativeScale"><span>相对移动倍率<output id="relativeScaleValue">1.0×</output></span><input id="relativeScale" type="range" min="0" max="4" step="1" value="2" list="relativeScaleStops" aria-label="相对移动倍率" title="五个固定挡位，不使用加速曲线"><datalist id="relativeScaleStops"><option value="0"></option><option value="1"></option><option value="2"></option><option value="3"></option><option value="4"></option></datalist></label>
-      <label class="speed-row" for="joystickSpeed"><span>方向键速度</span><input id="joystickSpeed" type="range" min="30" max="150" value="85" aria-label="方向键速度"></label>
+      <span class="settings-label">触控速度</span>
+      <div class="speed-levels" id="touchSensitivity" role="group" aria-label="触控速度"><button type="button" data-sensitivity="1">1×</button><button type="button" data-sensitivity="2">2×</button><button type="button" data-sensitivity="3">3×</button><button type="button" data-sensitivity="4">4×</button><button type="button" data-sensitivity="5">5×</button></div>
+      <label class="speed-row">方向键速度<input id="joystickSpeed" type="range" min="30" max="150" value="85" aria-label="方向键速度"></label>
       <div class="settings-actions"><button id="center" class="action" type="button">鼠标居中</button><button id="assist" class="action" type="button" aria-pressed="false">显示区域</button></div>
       <div id="assistInfo" class="assist-info">关闭</div>
     </div></details>
@@ -186,7 +191,7 @@ main { position:relative; min-height:0; }
 <script>
 'use strict';
     const $ = id => document.getElementById(id);
-    const controls = ['absoluteMode', 'relativeMode', 'highlightToggle', 'guidesToggle', 'overlayToggle', 'dirUp', 'dirDown', 'dirLeft', 'dirRight', 'relativeScale', 'joystickSpeed', 'click', 'doubleClick', 'rightClick', 'center', 'drag', 'scrollUp', 'scrollDown', 'assist', 'previewToggle'];
+    const controls = ['absoluteMode', 'relativeMode', 'highlightToggle', 'guidesToggle', 'overlayToggle', 'dirUp', 'dirDown', 'dirLeft', 'dirRight', 'joystickSpeed', 'click', 'doubleClick', 'rightClick', 'center', 'drag', 'scrollUp', 'scrollDown', 'assist', 'previewToggle'];
 
     let logged = false;
     let highlightOn = false;
@@ -203,6 +208,7 @@ main { position:relative; min-height:0; }
     const padPointers = new Map();
     let padMulti = false;
     let padScrollCarry = 0;
+    let touchSensitivity = Math.max(1, Math.min(5, Number(localStorage.getItem('touch-sensitivity')) || 3));
     const directionPointers = new Map();
     const directionKeys = new Set();
     let directionFrame = null;
@@ -233,25 +239,21 @@ main { position:relative; min-height:0; }
     let previewEpoch = 0;
     let previewCrop = null;
     let previewScreen = null;
+    let lastOverviewAt = 0;
     let lastActivity = 0;
     const cancelActionPointers = [];
-    const relativeScales = [.6, .8, 1, 1.3, 1.6];
-    const savedRelativeScale = Number(localStorage.getItem('relative-scale-step'));
-    let relativeScaleStep = Number.isInteger(savedRelativeScale) && savedRelativeScale >= 0 && savedRelativeScale < relativeScales.length ? savedRelativeScale : 2;
-
-    $('relativeScale').value = relativeScaleStep;
     $('joystickSpeed').value = Math.max(30, Math.min(150, Number(localStorage.getItem('joystick-speed')) || 85));
-
-    function relativeScale() { return relativeScales[relativeScaleStep]; }
-    function paintRelativeScale() {
-      $('relativeScaleValue').value = `${relativeScale().toFixed(1)}×`;
-      $('relativeScale').disabled = !logged || padMode !== 'relative';
+    function paintTouchSensitivity() {
+      document.querySelectorAll('[data-sensitivity]').forEach(button => {
+        button.setAttribute('aria-pressed', String(Number(button.dataset.sensitivity) === touchSensitivity));
+      });
     }
-    $('relativeScale').oninput = event => {
-      relativeScaleStep = Math.max(0, Math.min(relativeScales.length - 1, Math.round(Number(event.target.value))));
-      paintRelativeScale();
-    };
-    $('relativeScale').onchange = () => localStorage.setItem('relative-scale-step', String(relativeScaleStep));
+    document.querySelectorAll('[data-sensitivity]').forEach(button => button.addEventListener('click', () => {
+      touchSensitivity = Number(button.dataset.sensitivity);
+      localStorage.setItem('touch-sensitivity', String(touchSensitivity));
+      paintTouchSensitivity();
+    }));
+    paintTouchSensitivity();
 
     async function api(path, options = {}) {
       const controller = new AbortController();
@@ -363,7 +365,6 @@ main { position:relative; min-height:0; }
       $('loginLayer').classList.toggle('hidden', value);
       $('logout').classList.toggle('hidden', !value);
       controls.forEach(id => { $(id).disabled = !value; });
-      paintRelativeScale();
       paintHighlight();
       paintGuides();
       if (value) {
@@ -455,6 +456,11 @@ main { position:relative; min-height:0; }
         }
       } finally {
         inputBusy = false;
+        // A new pointer event can arrive after an error cleared the queue but
+        // before this in-flight drain reaches finally. Its drainInput call sees
+        // inputBusy and returns; explicitly resume here so that rare timing
+        // window cannot leave the touchpad queue asleep indefinitely.
+        if (logged && inputQueue.length) queueMicrotask(drainInput);
       }
     }
 
@@ -624,13 +630,15 @@ main { position:relative; min-height:0; }
       if (padMode === 'absolute') {
         if (dx || dy) moveAbsolute(pointer.x, pointer.y);
       } else {
-        pointer.pendingX += dx * relativeScale();
-        pointer.pendingY += dy * relativeScale();
+        pointer.pendingX += dx;
+        pointer.pendingY += dy;
         if (pointer.travel >= 6 || dragLocked) {
           const mx = Math.round(pointer.pendingX), my = Math.round(pointer.pendingY);
           pointer.pendingX -= mx;
           pointer.pendingY -= my;
-          if (mx || my) enqueueInput('/move', { mode: 'relative', dx: mx, dy: my }, 'pad');
+          if (mx || my) enqueueInput('/move', {
+            mode: 'relative', dx: mx, dy: my, sensitivity: touchSensitivity
+          }, 'pad');
         }
       }
     }
@@ -688,7 +696,6 @@ main { position:relative; min-height:0; }
       $('pad').setAttribute('aria-label', padMode === 'relative' ? '盲触控板：滑动移动，轻点单击，双指滚动' : '盲触控板：触碰定位，轻点单击，双指滚动');
       const hint = document.querySelector('.pad-hint');
       if (hint) hint.textContent = padMode === 'relative' ? '滑动移动 · 轻点单击 · 双指滚动' : '触碰定位 · 轻点单击 · 双指滚动';
-      paintRelativeScale();
     }
     $('absoluteMode').onclick = () => updatePadMode('absolute');
     $('relativeMode').onclick = () => updatePadMode('relative');
@@ -895,6 +902,7 @@ main { position:relative; min-height:0; }
     function clearPreview() {
       previewCrop = null;
       previewScreen = null;
+      lastOverviewAt = 0;
       ['overviewImage', 'detailImage'].forEach(id => {
         const canvas = $(id);
         canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
@@ -941,26 +949,37 @@ main { position:relative; min-height:0; }
       previewBusy = true;
       const epoch = previewEpoch;
       previewAbort = new AbortController();
-      let delay = 2000;
+      let delay = 1400;
       try {
-        const frame = await api('/pointer-view', { signal: previewAbort.signal });
-        const overview = new Image();
+        const needOverview = !previewScreen || performance.now() - lastOverviewAt >= 1200;
+        const frame = await api(`/pointer-view?overview=${needOverview ? '1' : '0'}`, { signal: previewAbort.signal });
         const detail = new Image();
-        overview.src = frame.overview;
         detail.src = frame.detail;
-        await Promise.all([overview.decode(), detail.decode()]);
+        const images = [detail.decode()];
+        let overview = null;
+        if (frame.overview) {
+          overview = new Image();
+          overview.src = frame.overview;
+          images.push(overview.decode());
+        }
+        await Promise.all(images);
         if (epoch !== previewEpoch || !logged || !previewOn || document.hidden) return;
         previewScreen = frame.screen;
         previewCrop = frame.crop;
         $('overviewFrame').style.aspectRatio = `${frame.screen.width} / ${frame.screen.height}`;
-        // Both JPEGs are decoded before the visible canvases are updated in one frame.
-        drawPreview('overviewImage', overview);
+        if (overview) {
+          drawPreview('overviewImage', overview);
+          lastOverviewAt = performance.now();
+        }
         drawPreview('detailImage', detail);
         fitDetail();
         $('previewPanel').classList.remove('stale');
         $('previewStatus').textContent = '鼠标位置';
         paintPreviewCursor();
-        delay = performance.now() - lastActivity < 1500 ? 400 : 2000;
+        // Three modes: immediate feedback, a short settling phase, then idle.
+        // previewBusy guarantees slow Wi-Fi can never build a request backlog.
+        const idleFor = performance.now() - lastActivity;
+        delay = idleFor < 1800 ? 180 : (idleFor < 6000 ? 420 : 1400);
       } catch (error) {
         if (epoch !== previewEpoch) return;
         if (error.status === 401) setLogged(false);

@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Tuple
 
 APP_NAME = "course-collector"
-VERSION = "0.3.3"
+VERSION = "0.4.0"
 SESSION_COOKIE = "gateway_session"
 UI_FILE = Path(__file__).with_name("ui.html")
 
@@ -597,7 +597,7 @@ class Config:
     target_root: str = r"D:\所有已知课件"
     context_root: str = r"D:\context"
     download_dirs: List[str] = field(default_factory=list)
-    extensions: List[str] = field(default_factory=lambda: [".pdf", ".pptx"])
+    extensions: List[str] = field(default_factory=lambda: [".pdf", ".ppt", ".pptx"])
     scan_interval: int = 5          # 课件扫描间隔（秒）
 
     # 截屏相关
@@ -619,7 +619,12 @@ class Config:
         self.extensions = [
             e if e.startswith(".") else f".{e}" for e in self.extensions
         ]
-        self.extensions = [e.lower() for e in self.extensions]
+        # Keep the built-in course formats even when an existing machine still
+        # has an older p7000.json.  In particular, the original default omitted
+        # legacy .ppt files, so upgrading the executable alone did not fix scans.
+        self.extensions = list(dict.fromkeys(
+            [e.lower() for e in self.extensions] + [".pdf", ".ppt", ".pptx"]
+        ))
 
     @classmethod
     def from_file(cls, path: str) -> "Config":
@@ -806,8 +811,14 @@ class Monitor:
         self.stop_event = threading.Event()
         self.info_lock = threading.Lock()
         self._scan_lock = threading.Lock()
+        self._scan_state_lock = threading.Lock()
+        self._rescan_requested = threading.Event()
         self.current_drives: List[dict] = []
         self.last_scan_ts: str = ""
+        self.scan_status = {
+            "running": False, "queued": False, "started_at": "",
+            "finished_at": "", "checked": 0, "copied": 0, "error": "",
+        }
 
     def log(self, level: str, message: str, **extra: object) -> None:
         self.state.add_log(level, message, **extra)
@@ -816,18 +827,59 @@ class Monitor:
         root_path = Path(root)
         if not root_path.is_dir():
             return
-        it = root_path.rglob("*") if recursive else root_path.glob("*")
-        for p in it:
+        if recursive:
+            # Path.rglob aborts the entire scan when one directory on a USB disk
+            # is unreadable or disappears. os.walk lets us skip that directory
+            # and continue collecting the remaining presentations.
+            def unreadable(error: OSError) -> None:
+                self.log("warn", f"跳过无法读取的目录: {error.filename or root}",
+                         detail=str(error))
+
+            for directory, _dirs, files in os.walk(root_path, topdown=True, onerror=unreadable,
+                                                   followlinks=False):
+                for name in files:
+                    p = Path(directory) / name
+                    if p.suffix.lower() in self.config.extensions and not is_temp_download(p):
+                        yield p
+            return
+        try:
+            entries = list(root_path.iterdir())
+        except OSError as error:
+            self.log("warn", f"无法读取下载目录: {root}", detail=str(error))
+            return
+        for p in entries:
             try:
-                if not p.is_file():
-                    continue
+                if (p.is_file() and p.suffix.lower() in self.config.extensions
+                        and not is_temp_download(p)):
+                    yield p
             except OSError:
                 continue
-            if p.suffix.lower() not in self.config.extensions:
-                continue
-            if is_temp_download(p):
-                continue
-            yield p
+
+    def _set_scan_status(self, **changes: object) -> None:
+        with self._scan_state_lock:
+            self.scan_status.update(changes)
+
+    def scan_status_json(self) -> dict:
+        with self._scan_state_lock:
+            return dict(self.scan_status)
+
+    def _perform_scan(self) -> None:
+        self._set_scan_status(
+            running=True, started_at=local_now(), finished_at="",
+            checked=0, copied=0, error="",
+        )
+        self.log("info", "开始扫描 PPT/PPTX/PDF 课件")
+        try:
+            self._scan_once_unlocked()
+        except Exception as error:
+            self._set_scan_status(error=str(error))
+            self.log("error", f"扫描异常: {error}", detail=repr(error))
+            raise
+        finally:
+            self.last_scan_ts = local_now()
+            self._set_scan_status(running=False, finished_at=self.last_scan_ts)
+        status = self.scan_status_json()
+        self.log("info", f"扫描完成：检查 {status['checked']} 个，归档 {status['copied']} 个")
 
     def _copy_one(self, src: Path, category_dir: Path, source_label: str) -> Optional[str]:
         try:
@@ -887,7 +939,7 @@ class Monitor:
         if not self._scan_lock.acquire(blocking=False):
             return False
         try:
-            self._scan_once_unlocked()
+            self._run_scan_series()
             return True
         finally:
             try:
@@ -895,16 +947,16 @@ class Monitor:
             finally:
                 self._scan_lock.release()
 
-    def start_scan_async(self) -> bool:
-        """仅在当前没有扫描时启动一个后台扫描。"""
+    def start_scan_async(self) -> dict:
+        """Start now, or queue exactly one follow-up scan when already busy."""
         if not self._scan_lock.acquire(blocking=False):
-            return False
+            self._rescan_requested.set()
+            self._set_scan_status(queued=True)
+            return {"started": False, "queued": True}
 
         def work() -> None:
             try:
-                self._scan_once_unlocked()
-            except Exception as error:  # noqa: BLE001
-                self.log("error", f"扫描异常: {error}", detail=repr(error))
+                self._run_scan_series(ignore_errors=True)
             finally:
                 try:
                     self.state.flush_file_index()
@@ -918,7 +970,20 @@ class Monitor:
         except Exception:
             self._scan_lock.release()
             raise
-        return True
+        return {"started": True, "queued": False}
+
+    def _run_scan_series(self, ignore_errors: bool = False) -> None:
+        """Run one scan plus one coalesced manual request made while it runs."""
+        while True:
+            self._rescan_requested.clear()
+            self._set_scan_status(queued=False)
+            try:
+                self._perform_scan()
+            except Exception:
+                if not ignore_errors:
+                    raise
+            if not self._rescan_requested.is_set():
+                return
 
     def _scan_once_unlocked(self) -> None:
         target_root = Path(self.config.target_root)
@@ -936,6 +1001,7 @@ class Monitor:
 
             count = 0
             for src in self._iter_candidates(root, recursive=True):
+                self._set_scan_status(checked=self.scan_status_json()["checked"] + 1)
                 try:
                     dst = self._copy_one(src, category_dir, label or root)
                 except (OSError, shutil.Error) as e:
@@ -944,6 +1010,7 @@ class Monitor:
                     continue
                 if dst:
                     count += 1
+                    self._set_scan_status(copied=self.scan_status_json()["copied"] + 1)
                     self.log("ok", f"归档 U 盘课件: {src.name}",
                              source=label or root, category=category_name, file=src.name, dst=dst)
             if count:
@@ -959,6 +1026,7 @@ class Monitor:
                 continue
             category_dir = target_root / "下载的课件"
             for src in self._iter_candidates(dl, recursive=False):
+                self._set_scan_status(checked=self.scan_status_json()["checked"] + 1)
                 try:
                     age = time.time() - src.stat().st_mtime
                 except OSError:
@@ -972,10 +1040,9 @@ class Monitor:
                              source="下载", category="下载的课件", detail=str(e))
                     continue
                 if dst:
+                    self._set_scan_status(copied=self.scan_status_json()["copied"] + 1)
                     self.log("ok", f"归档下载课件: {src.name}",
                              source="下载", category="下载的课件", file=src.name, dst=dst)
-
-        self.last_scan_ts = local_now()
 
     def run(self) -> None:
         self.log("info", "课件监测线程已启动")
@@ -1264,6 +1331,49 @@ class DisplayManager:
     def is_visible(self) -> bool:
         with self._visible_lock:
             return self._visible
+
+
+class SystemControls:
+    """Small, explicitly allow-listed controls for the interactive Windows desktop."""
+
+    KEYEVENTF_KEYUP = 0x0002
+    ACTIONS = {
+        "volume_down": ((0xAE,), "音量降低"),
+        "volume_up": ((0xAF,), "音量提高"),
+        "volume_mute": ((0xAD,), "静音切换"),
+        "media_previous": ((0xB1,), "上一媒体"),
+        "media_play_pause": ((0xB3,), "播放或暂停"),
+        "media_next": ((0xB0,), "下一媒体"),
+        "presentation_start": ((0x74,), "从头放映"),
+        "presentation_current": ((0x10, 0x74), "从当前页放映"),
+        "presentation_exit": ((0x1B,), "退出放映或当前操作"),
+        "slide_previous": ((0x21,), "上一页"),
+        "slide_next": ((0x22,), "下一页"),
+        "show_desktop": ((0x5B, 0x44), "显示或恢复桌面"),
+        "task_view": ((0x5B, 0x09), "任务视图"),
+    }
+
+    def __init__(self, user32=None) -> None:
+        self.user32 = user32
+        if self.user32 is None and is_windows():
+            self.user32 = ctypes.windll.user32
+        self.lock = threading.Lock()
+
+    def invoke(self, action: str) -> dict:
+        definition = self.ACTIONS.get(str(action))
+        if definition is None:
+            raise ValueError("不支持的教学机控制操作")
+        if self.user32 is None:
+            raise RuntimeError("教学机控制只支持 Windows")
+        keys, label = definition
+        with self.lock:
+            # Modifiers go down first and come up last. The whitelist contains
+            # virtual-key codes only; callers cannot provide a command or key.
+            for key in keys:
+                self.user32.keybd_event(key, 0, 0, 0)
+            for key in reversed(keys):
+                self.user32.keybd_event(key, 0, self.KEYEVENTF_KEYUP, 0)
+        return {"ok": True, "action": action, "label": label}
 
 
 class FileStore:
@@ -1808,8 +1918,27 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
         if not self._require_auth():
             return
         if parsed.path == "/api/scan":
-            started = self.app.trigger_scan()
-            self._send_json({"ok": True, "started": started})
+            result = self.app.trigger_scan()
+            self._send_json({"ok": True, **result})
+            return
+        if parsed.path == "/api/restart-touchpad":
+            try:
+                self._send_json(self.app.request_touchpad_restart(), status=202)
+            except (OSError, RuntimeError) as exc:
+                self._send_json({"error": f"无法提交重启请求：{exc}"}, status=500)
+            return
+        if parsed.path == "/api/control":
+            raw_body = self._read_request_body()
+            if raw_body is None:
+                return
+            try:
+                body = json.loads((raw_body or b"{}").decode("utf-8"))
+                if not isinstance(body, dict):
+                    raise ValueError
+                self._send_json(self.app.system_controls.invoke(str(body.get("action", ""))))
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError,
+                    RuntimeError, OSError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
             return
         if parsed.path == "/api/shoot":
             shot = self.app.capturer.shoot_now()
@@ -1913,10 +2042,22 @@ class MonitorServer(http.server.ThreadingHTTPServer):
         self.capturer = capturer
         self.filestore = filestore
         self.display = display
+        self.system_controls = SystemControls()
         super().__init__(address, MonitorHandler)
 
-    def trigger_scan(self) -> bool:
+    def trigger_scan(self) -> dict:
         return self.monitor.start_scan_async()
+
+    def request_touchpad_restart(self) -> dict:
+        if not self.config.auth_file:
+            raise RuntimeError("运行状态目录不可用")
+        marker = Path(self.config.auth_file).resolve().parent / "restart-7050.request"
+        atomic_text(marker, json.dumps({
+            "requested_at": utc_now(),
+            "request_id": secrets.token_hex(8),
+        }, ensure_ascii=False))
+        self.state.add_log("warn", "已请求监督器快速重启 7050 触控板网关", source="平板")
+        return {"ok": True, "requested": True}
 
     def status_json(self, include_log: bool = True) -> dict:
         with self.monitor.info_lock:
@@ -1929,6 +2070,7 @@ class MonitorServer(http.server.ThreadingHTTPServer):
             "target_root": self.config.target_root,
             "context_root": self.config.context_root,
             "scan_interval": self.config.scan_interval,
+            "scan": self.monitor.scan_status_json(),
             "extensions": self.config.extensions,
             "download_dirs": self.config.download_dirs,
             "drives": drives,

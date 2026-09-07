@@ -25,6 +25,7 @@ $LogFile = ''
 $NewPassword = ''
 $StopMarker = Join-Path $StateRoot 'supervisor.stop'
 $SupervisorLock = Join-Path $StateRoot 'supervisor.lock'
+$Restart7050Marker = Join-Path $StateRoot 'restart-7050.request'
 $PortPrograms = @{
   9090 = 'claude_gateway_agent'; 9091 = 'kill_gateway';
   7050 = 'touchpad_gateway'; 7000 = 'course_monitor'
@@ -371,6 +372,21 @@ function Start-Supervisor {
     $failureCounts = @{}
     foreach ($port in @(7000,7050,9090,9091)) { $failureCounts[$port] = 0 }
     while (-not (Test-Path -LiteralPath $StopMarker)) {
+      if (Test-Path -LiteralPath $Restart7050Marker) {
+        try {
+          Write-Host 'Requested restart of service 7050.'
+          Stop-One 7050
+          if (-not (Test-Path -LiteralPath $StopMarker)) {
+            Start-One 7050
+            $failureCounts[7050] = 0
+            Remove-Item -LiteralPath $Restart7050Marker -Force
+            Write-Host 'Requested restart of service 7050 completed.'
+          }
+        } catch {
+          # Keep the request file so the next supervisor pass retries it.
+          Write-Host ("Requested restart of service 7050 failed: " + $_.Exception.Message) -ForegroundColor Red
+        }
+      }
       foreach ($port in @(7000,7050,9090,9091)) {
         if (Test-Path -LiteralPath $StopMarker) { break }
         try { Test-Health $port; $failureCounts[$port] = 0 }

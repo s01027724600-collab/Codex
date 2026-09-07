@@ -19,6 +19,12 @@ class RuntimeTemplateTests(unittest.TestCase):
         self.assertIn("$failureCounts[$port] -ge 3", RUNTIME)
         self.assertIn("Launch-Supervisor", RUNTIME)
 
+    def test_supervisor_honors_authenticated_7000_touchpad_restart_request(self):
+        self.assertIn("restart-7050.request", RUNTIME)
+        self.assertIn("Stop-One 7050", RUNTIME)
+        self.assertIn("Start-One 7050", RUNTIME)
+        self.assertIn("Remove-Item -LiteralPath $Restart7050Marker", RUNTIME)
+
     def test_firewall_allows_only_local_subnet_on_every_profile(self):
         self.assertIn("-Profile Any -RemoteAddress LocalSubnet", RUNTIME)
         self.assertIn("Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet", RUNTIME)

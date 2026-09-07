@@ -133,7 +133,9 @@
   .eyebrow { margin-bottom: 5px; color: var(--accent); font-size: 12px; font-weight: 650; letter-spacing: .04em; }
   h1 { margin: 0; font: 700 clamp(26px,2vw,32px)/1.08 "SF Pro Display","Segoe UI Variable Display","Segoe UI",sans-serif; letter-spacing: -.03em; }
   .page-subtitle { display: none; }
+  .topbar-actions { display:flex; align-items:center; gap:10px; }
   .sync-card { flex: none; display: flex; align-items: center; gap: 8px; padding: 5px 2px; color: var(--text-secondary); font-size: 12px; }
+  .button.danger { color:#b42318; background:#fff1f0; border-color:#fecaca; }
   .sync-card .status-dot { width: 7px; height: 7px; box-shadow: none; }
   .content { width: 100%; padding: 0 clamp(20px,2vw,32px) 24px; }
   .pane { animation: pane-in .38s var(--ease) both; }
@@ -260,6 +262,12 @@
   .lvl-info { color: var(--text-secondary); }
 
   .clipboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .control-sections { display:grid; gap:18px; }
+  .control-card { padding:18px; }
+  .control-card h2 { margin:0 0 5px; font-size:17px; }
+  .control-card p { margin:0 0 15px; color:var(--text-secondary); font-size:13px; }
+  .control-buttons { display:grid; grid-template-columns:repeat(3,minmax(120px,1fr)); gap:10px; }
+  .control-buttons .button { min-height:48px; }
   .clipboard-card { padding: 20px; }
   .direction { margin-bottom: 16px; display: flex; align-items: center; gap: 10px; }
   .direction strong { display: block; font-size: 15px; }
@@ -305,7 +313,7 @@
     .sync-card span { display: none; }
     .content { padding: 0 12px calc(96px + env(safe-area-inset-bottom)); }
     .browser { max-height: none; }
-    .mobile-tabs { position: fixed; left: 12px; right: 12px; bottom: max(12px,env(safe-area-inset-bottom)); z-index: 40; height: 66px; padding: 5px; display: grid; grid-template-columns: repeat(4,1fr); border: 1px solid var(--line-strong); border-radius: 20px; background: var(--sidebar); box-shadow: var(--shadow-float); -webkit-backdrop-filter: saturate(180%) blur(26px); backdrop-filter: saturate(180%) blur(26px); }
+    .mobile-tabs { position: fixed; left: 12px; right: 12px; bottom: max(12px,env(safe-area-inset-bottom)); z-index: 40; height: 66px; padding: 5px; display: grid; grid-template-columns: repeat(5,1fr); border: 1px solid var(--line-strong); border-radius: 20px; background: var(--sidebar); box-shadow: var(--shadow-float); -webkit-backdrop-filter: saturate(180%) blur(26px); backdrop-filter: saturate(180%) blur(26px); }
     .mobile-tabs .nav-item { min-height: 54px; padding: 5px 2px; justify-content: center; flex-direction: column; gap: 3px; border-radius: 15px; font-size: 10px; }
     .mobile-tabs .nav-item .svg-icon { width: 20px; height: 20px; }
     .mobile-tabs .nav-item.active { background: var(--surface-raised); }
@@ -333,6 +341,7 @@
     .selection-copy { margin-left: auto; }
     .file-browser-panel .browser { height: calc(100vh - 210px - env(safe-area-inset-bottom)); }
     .archive-bar { grid-template-columns: 1fr 1fr auto; }
+    .control-buttons { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .archive-item:first-child { grid-column: 1 / -1; border-right: 0; border-bottom: 1px solid var(--line); padding: 4px 4px 8px; }
     .selection-copy { display: none; }
     .modal { padding: 14px; }
@@ -360,6 +369,7 @@
   <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8.5h3l1.5-2h7l1.5 2h3v10H4z"/><circle cx="12" cy="13.5" r="3.2"/></symbol>
   <symbol id="i-archive" viewBox="0 0 24 24"><path d="M5 8h14v12H5zM4 4h16v4H4zM9 12h6"/></symbol>
   <symbol id="i-clipboard" viewBox="0 0 24 24"><path d="M8 6H5v15h14V6h-3M9 3h6v5H9z"/></symbol>
+  <symbol id="i-controls" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M6 14v6"/></symbol>
 </svg>
 
 <div class="app-shell">
@@ -372,6 +382,7 @@
       <button class="nav-item" data-tab="shots"><svg class="svg-icon"><use href="#i-camera"/></svg><span>截图</span></button>
       <button class="nav-item" data-tab="courses"><svg class="svg-icon"><use href="#i-archive"/></svg><span>归档</span></button>
       <button class="nav-item" data-tab="clipboard"><svg class="svg-icon"><use href="#i-clipboard"/></svg><span>剪切板</span></button>
+      <button class="nav-item" data-tab="controls"><svg class="svg-icon"><use href="#i-controls"/></svg><span>控制</span></button>
     </nav>
     <div class="side-footer">
       <div class="connection" data-connection><span class="status-dot"></span><span data-connection-text>在线</span></div>
@@ -384,30 +395,17 @@
         <h1 id="page-title">文件</h1>
         <p class="page-subtitle" id="page-subtitle">查找、预览并传输教学资料。</p>
       </div>
-      <div class="sync-card" title="状态自动同步">
-        <span class="status-dot"></span><span id="last-sync">连接中</span>
+      <div class="topbar-actions">
+        <button class="button danger" id="restart-touchpad" title="仅在 7050 触控板失控时使用">重启触控板</button>
+        <div class="sync-card" title="状态自动同步">
+          <span class="status-dot"></span><span id="last-sync">连接中</span>
+        </div>
       </div>
     </header>
 
     <div class="content">
       <section class="pane" id="pane-files" aria-labelledby="page-title">
         <select id="roots" class="hidden" aria-hidden="true" tabindex="-1"></select>
-        <div class="panel transfer-strip">
-          <div class="transfer-action">
-            <div class="transfer-copy"><strong>传到教学机</strong><span>支持多选，保存到“平板传输”</span></div>
-            <button class="button secondary" id="upload-files">选择文件</button>
-          </div>
-          <div class="transfer-action">
-            <div class="transfer-copy"><strong>投放本机图片</strong><span>上传后等比例全屏显示</span></div>
-            <button class="button" id="project-local">选择图片</button>
-          </div>
-          <div class="transfer-progress hidden" id="transfer-progress" aria-live="polite">
-            <div class="transfer-progress-row"><span id="transfer-name">准备传输</span><span id="transfer-percent">0%</span></div>
-            <div class="progress-track"><div class="progress-value" id="transfer-value"></div></div>
-          </div>
-          <input class="hidden" id="file-picker" type="file" multiple>
-          <input class="hidden" id="image-picker" type="file" accept=".png,.jpg,.jpeg,.gif,.bmp,image/png,image/jpeg,image/gif,image/bmp">
-        </div>
         <div class="panel file-browser-panel">
           <div class="file-toolbar">
             <div class="toolbar-path">
@@ -472,6 +470,32 @@
           </div>
         </div>
       </section>
+
+      <section class="pane hidden" id="pane-controls" aria-labelledby="page-title">
+        <div class="control-sections">
+          <div class="panel control-card"><h2>声音</h2><p>调整教学机系统音量。</p><div class="control-buttons">
+            <button class="button secondary" data-control="volume_down">音量 −</button>
+            <button class="button secondary" data-control="volume_mute">静音 / 恢复</button>
+            <button class="button secondary" data-control="volume_up">音量 ＋</button>
+          </div></div>
+          <div class="panel control-card"><h2>媒体</h2><p>控制当前正在播放的音频或视频。</p><div class="control-buttons">
+            <button class="button secondary" data-control="media_previous">上一首</button>
+            <button class="button" data-control="media_play_pause">播放 / 暂停</button>
+            <button class="button secondary" data-control="media_next">下一首</button>
+          </div></div>
+          <div class="panel control-card"><h2>演示文稿</h2><p>按键发送给教学机当前窗口，使用前先选中 PowerPoint。</p><div class="control-buttons">
+            <button class="button secondary" data-control="presentation_start">从头放映</button>
+            <button class="button secondary" data-control="presentation_current">从当前页放映</button>
+            <button class="button danger" data-control="presentation_exit">退出放映 / Esc</button>
+            <button class="button secondary" data-control="slide_previous">上一页</button>
+            <button class="button secondary" data-control="slide_next">下一页</button>
+          </div></div>
+          <div class="panel control-card"><h2>桌面</h2><p>快速整理和切换教学窗口。</p><div class="control-buttons">
+            <button class="button secondary" data-control="show_desktop">显示 / 恢复桌面</button>
+            <button class="button secondary" data-control="task_view">任务视图</button>
+          </div></div>
+        </div>
+      </section>
     </div>
   </main>
 </div>
@@ -481,6 +505,7 @@
   <button class="nav-item" data-tab="shots"><svg class="svg-icon"><use href="#i-camera"/></svg><span>截图</span></button>
   <button class="nav-item" data-tab="courses"><svg class="svg-icon"><use href="#i-archive"/></svg><span>归档</span></button>
   <button class="nav-item" data-tab="clipboard"><svg class="svg-icon"><use href="#i-clipboard"/></svg><span>剪切板</span></button>
+  <button class="nav-item" data-tab="controls"><svg class="svg-icon"><use href="#i-controls"/></svg><span>控制</span></button>
 </nav>
 
 <div class="modal hidden" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-name">
@@ -527,7 +552,6 @@
   let allShots = [];
   let shotTotal = 0;
   let loadingMoreShots = false;
-  let transferBusy = false;
 
   function toast(message) {
     const node = $('toast');
@@ -572,7 +596,8 @@
     files: ['文件','浏览与传输'],
     shots: ['截图','捕捉与投放'],
     courses: ['归档','自动收集'],
-    clipboard: ['剪切板','传递文字']
+    clipboard: ['剪切板','传递文字'],
+    controls: ['教学控制','声音、媒体与演示']
   };
 
   function activateTab(name, remember=true) {
@@ -931,10 +956,43 @@
     button.disabled = true;
     try {
       const result = await fetchJSON('/api/scan',{method:'POST'});
-      toast(result.started ? '已开始扫描课件' : '扫描正在进行');
+      toast(result.started ? '已开始扫描 PPT/PPTX/PDF' : '扫描正在进行，已安排再次扫描');
     }
     catch (_) { toast('扫描请求失败'); }
     setTimeout(() => { button.disabled = false; },900);
+  });
+
+  $('restart-touchpad').addEventListener('click', async event => {
+    if (!confirm('仅在触控板失控时使用。确定快速重启 7050 网关吗？')) return;
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = '正在请求';
+    try {
+      await fetchJSON('/api/restart-touchpad', {method:'POST'});
+      toast('已请求重启触控板，请等待约 10 秒后重连 7050');
+    } catch (error) {
+      toast(error.message || '触控板重启请求失败');
+    } finally {
+      setTimeout(() => { button.disabled = false; button.textContent = '重启触控板'; }, 10000);
+    }
+  });
+
+  document.querySelectorAll('[data-control]').forEach(button => {
+    button.addEventListener('click', async () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        const result = await fetchJSON('/api/control', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({action:button.dataset.control})
+        });
+        toast(result.label || '操作已发送');
+      } catch (error) {
+        toast(error.message || '教学机控制失败');
+      } finally {
+        setTimeout(() => { button.disabled = false; }, 250);
+      }
+    });
   });
 
   $('clip-read').addEventListener('click',async () => {
@@ -973,6 +1031,10 @@
       $('target').textContent = data.target_root || '—';
       $('seen').textContent = data.seen_count ?? 0;
       $('drives').textContent = data.drives?.length ? data.drives.map(item => item.label || item.drive).join('、') : '暂无 U 盘';
+      const scan = data.scan || {};
+      $('scan-now').textContent = scan.running
+        ? `扫描中 ${scan.checked || 0}`
+        : (scan.error ? '扫描重试' : '扫描');
       if (activeTab === 'courses') {
         const rows = data.log || [];
         $('rows').innerHTML = rows.length ? rows.map(entry => `<tr><td class="log-time">${esc(entry.ts || '')}</td><td class="log-source">${esc(entry.source || '系统')}</td><td class="lvl-${esc(entry.level || 'info')}">${esc(entry.message || '')}</td></tr>`).join('') : `<tr><td colspan="3">${emptyState('暂无归档记录','新课件归档后会显示在这里')}</td></tr>`;
