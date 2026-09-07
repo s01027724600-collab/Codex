@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('initialize','start','stop','status','repair','firewall','disable-autostart')]
+  [ValidateSet('initialize','start','stop','status','repair','firewall','supervise','disable-autostart')]
   [string]$Command = 'status',
   [switch]$NoPause,
   [switch]$TestMode,
@@ -23,6 +23,8 @@ $Failures = [Collections.Generic.List[string]]::new()
 $Checks = [ordered]@{}
 $LogFile = ''
 $NewPassword = ''
+$StopMarker = Join-Path $StateRoot 'supervisor.stop'
+$SupervisorLock = Join-Path $StateRoot 'supervisor.lock'
 $PortPrograms = @{
   9090 = 'claude_gateway_agent'; 9091 = 'kill_gateway';
   7050 = 'touchpad_gateway'; 7000 = 'course_monitor'
@@ -248,7 +250,24 @@ function Stop-OwnedProcess([int]$ProcessId, [string]$Label) {
     if (-not $process.WaitForExit(7000)) { throw ('Timed out stopping ' + $Label + ' (PID ' + $ProcessId + ').') }
   } finally { $process.Dispose() }
 }
+function Stop-One([int]$Port) {
+  $processes = @(Get-CimInstance Win32_Process)
+  $program = Program-Path $Port
+  if ($Port -eq 7050) {
+    $workerProgram = Join-Path $Root 'p7050\uia_scan_worker.exe'
+    foreach ($gateway in @($processes | Where-Object { $_.ExecutablePath -and [string]::Equals($_.ExecutablePath,$program,[StringComparison]::OrdinalIgnoreCase) })) {
+      foreach ($worker in @($processes | Where-Object { $_.ParentProcessId -eq $gateway.ProcessId -and $_.ExecutablePath -and [string]::Equals($_.ExecutablePath,$workerProgram,[StringComparison]::OrdinalIgnoreCase) })) {
+        Stop-OwnedProcess $worker.ProcessId 'UI Automation scanner'
+      }
+    }
+  }
+  foreach ($target in @($processes | Where-Object { $_.ExecutablePath -and [string]::Equals($_.ExecutablePath,$program,[StringComparison]::OrdinalIgnoreCase) })) {
+    Stop-OwnedProcess $target.ProcessId ('service ' + $Port)
+  }
+}
 function Stop-All {
+  [IO.Directory]::CreateDirectory($StateRoot) | Out-Null
+  [IO.File]::WriteAllText($StopMarker,(Get-Date).ToString('o'))
   $processes = @(Get-CimInstance Win32_Process)
   $scanWorker = Join-Path $Root 'p7050\uia_scan_worker.exe'
   # Stop the optional scanner child first, so a forced gateway stop never leaves it polling in the background.
@@ -263,6 +282,8 @@ function Stop-All {
       Stop-OwnedProcess $target.ProcessId ('service ' + $port)
     }
   }
+  Start-Sleep -Milliseconds 1200
+  foreach ($port in @(7050,7000,9091,9090)) { Stop-One $port }
   Write-Host 'Stopped only service executables belonging to this extracted package. Data was kept.'
 }
 function Set-Firewall {
@@ -271,11 +292,25 @@ function Set-Firewall {
     $name = "TeachingGateway-TCP-$port"
     $rule = Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
     if ($rule) {
-      Set-NetFirewallRule -Name $name -Enabled True -Action Allow -Direction Inbound -Profile Domain,Private | Out-Null
+      Set-NetFirewallRule -Name $name -Enabled True -Action Allow -Direction Inbound -Profile Any | Out-Null
       $rule | Get-NetFirewallPortFilter | Set-NetFirewallPortFilter -Protocol TCP -LocalPort $port | Out-Null
-    } else { New-NetFirewallRule -Name $name -DisplayName $name -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Domain,Private | Out-Null }
+      $rule | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet | Out-Null
+    } else { New-NetFirewallRule -Name $name -DisplayName $name -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any -RemoteAddress LocalSubnet | Out-Null }
     $check = Get-NetFirewallRule -Name $name
     if ($check.Enabled -ne 'True' -or $check.Action -ne 'Allow') { throw "Firewall rule verification failed for $port." }
+    $addresses = @($check | Get-NetFirewallAddressFilter | Select-Object -ExpandProperty RemoteAddress)
+    if ($addresses -notcontains 'LocalSubnet') { throw "Firewall remote-address verification failed for $port." }
+  }
+}
+function Test-FirewallRules {
+  foreach ($port in @(7000,7050,9090,9091)) {
+    $name = "TeachingGateway-TCP-$port"
+    $rule = Get-NetFirewallRule -Name $name -ErrorAction Stop
+    if ($rule.Enabled -ne 'True' -or $rule.Action -ne 'Allow' -or $rule.Direction -ne 'Inbound') { throw "Firewall rule is disabled or invalid for $port." }
+    $ports = @($rule | Get-NetFirewallPortFilter | Select-Object -ExpandProperty LocalPort)
+    if (-not @($ports | Where-Object { [string]$_ -eq [string]$port }).Count) { throw "Firewall port filter is invalid for $port." }
+    $addresses = @($rule | Get-NetFirewallAddressFilter | Select-Object -ExpandProperty RemoteAddress)
+    if ($addresses -notcontains 'LocalSubnet') { throw "Firewall remote scope is not LocalSubnet for $port." }
   }
 }
 function Ensure-Firewall {
@@ -297,7 +332,9 @@ function Ensure-Autostart {
   $path = Join-Path $startup $(if ($testStartup) { 'TeachingGateway-test.lnk' } else { 'TeachingGateway.lnk' })
   $shortcut = $shell.CreateShortcut($path)
   $shortcut.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  $shortcut.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ' + (Q (Join-Path $Root 'gateway_runtime.ps1')) + ' -Command start -NoPause -StateRoot ' + (Q $StateRoot)
+  $runtime = Join-Path $Root 'gateway_runtime.ps1'
+  $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ' + (Q $runtime) + ' -Command supervise -NoPause -StateRoot ' + (Q $StateRoot)
+  $shortcut.Arguments = $arguments
   $shortcut.WorkingDirectory = $Root
   $shortcut.WindowStyle = 7
   $shortcut.Description = 'TeachingGateway 7000 / 7050 / 9090 / 9091'
@@ -306,7 +343,62 @@ function Ensure-Autostart {
   if ($testStartup) {
     Remove-Item -LiteralPath $path -Force -ErrorAction Stop
     Write-Host 'TEST ONLY: logon Startup command created, verified and removed outside the user Startup folder.'
+  } else {
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $runCommand = (Q (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe')) + ' ' + $arguments
+    New-Item -Path $runKey -Force | Out-Null
+    New-ItemProperty -Path $runKey -Name 'TeachingGateway' -Value $runCommand -PropertyType String -Force | Out-Null
+    if ((Get-ItemPropertyValue -Path $runKey -Name 'TeachingGateway') -ne $runCommand) { throw 'Current-user Run registry verification failed.' }
   }
+}
+function Test-Autostart {
+  $startup = [Environment]::GetFolderPath('Startup')
+  $path = Join-Path $startup 'TeachingGateway.lnk'
+  if (-not (Test-Path -LiteralPath $path)) { throw 'TeachingGateway startup shortcut is missing.' }
+  $shell = New-Object -ComObject WScript.Shell
+  $shortcut = $shell.CreateShortcut($path)
+  if ($shortcut.Arguments -notlike '*-Command supervise*' -or $shortcut.Arguments -notlike ('*' + (Join-Path $Root 'gateway_runtime.ps1') + '*')) { throw 'TeachingGateway startup shortcut points to an old package or command.' }
+  $runCommand = Get-ItemPropertyValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'TeachingGateway' -ErrorAction Stop
+  if ($runCommand -notlike '*-Command supervise*' -or $runCommand -notlike ('*' + (Join-Path $Root 'gateway_runtime.ps1') + '*')) { throw 'TeachingGateway Run entry points to an old package or command.' }
+}
+function Start-Supervisor {
+  [IO.Directory]::CreateDirectory($StateRoot) | Out-Null
+  try { $lock = [IO.File]::Open($SupervisorLock,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+  catch [IO.IOException] { Write-Host 'A TeachingGateway supervisor is already running.'; return }
+  try {
+    Remove-Item -LiteralPath $StopMarker -Force -ErrorAction SilentlyContinue
+    Write-Host 'Supervisor active. Services are checked every 8 seconds and restarted after failures.'
+    $failureCounts = @{}
+    foreach ($port in @(7000,7050,9090,9091)) { $failureCounts[$port] = 0 }
+    while (-not (Test-Path -LiteralPath $StopMarker)) {
+      foreach ($port in @(7000,7050,9090,9091)) {
+        if (Test-Path -LiteralPath $StopMarker) { break }
+        try { Test-Health $port; $failureCounts[$port] = 0 }
+        catch {
+          $failureCounts[$port]++
+          $missing = @(Get-Listeners ($port + $PortOffset)).Count -eq 0
+          Write-Host ("Service $port unhealthy ($($failureCounts[$port])/3): " + $_.Exception.Message)
+          # A missing listener is restarted immediately. A responding process gets three checks so a busy request
+          # or brief network-stack delay does not itself cause the empty response that supervision is meant to fix.
+          if ($missing -or $failureCounts[$port] -ge 3) {
+            try {
+              Stop-One $port
+              if (-not (Test-Path -LiteralPath $StopMarker)) { Start-One $port; $failureCounts[$port] = 0 }
+            } catch { Write-Host ("Service $port restart failed: " + $_.Exception.Message) -ForegroundColor Red }
+          }
+        }
+      }
+      Start-Sleep -Seconds 8
+    }
+    Write-Host 'Supervisor stop marker detected; exiting.'
+  } finally { $lock.Dispose() }
+}
+function Launch-Supervisor {
+  if ($TestMode) { Write-Host 'TEST ONLY: persistent supervisor process not launched.'; return }
+  $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ' + (Q (Join-Path $Root 'gateway_runtime.ps1')) + ' -Command supervise -NoPause -StateRoot ' + (Q $StateRoot)
+  Start-Process -FilePath $powershell -ArgumentList $arguments -WorkingDirectory $Root -WindowStyle Hidden | Out-Null
+  Write-Host 'Persistent service supervisor launched.'
 }
 function Show-Urls {
   Write-Host "Data/config/logs: $StateRoot"
@@ -318,7 +410,7 @@ function Show-Urls {
 
 try {
   [IO.Directory]::CreateDirectory((Join-Path $StateRoot 'logs')) | Out-Null
-  $LogFile = Join-Path $StateRoot ('logs\' + $Command + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.log')
+  $LogFile = Join-Path $StateRoot ('logs\' + $Command + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + $PID + '.log')
   Start-Transcript -LiteralPath $LogFile -Force | Out-Null
   $TranscriptStarted = $true
   Write-Host 'TeachingGateway - deployment and recovery'
@@ -327,23 +419,33 @@ try {
   elseif ($Command -eq 'disable-autostart') {
     $link = Join-Path ([Environment]::GetFolderPath('Startup')) 'TeachingGateway.lnk'
     if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link; Write-Host 'Removed TeachingGateway Startup shortcut only. Rerun initialization to restore it.' }
+    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'TeachingGateway' -ErrorAction SilentlyContinue
   } else {
     Assert-Layout
-    if ($Command -in @('initialize','repair')) {
-      Step 'login configuration' { Ensure-Auth }
-      Step 'storage configuration' { Ensure-Configs }
-      Step 'bundled tools' { Ensure-Tools }
-      Step 'firewall' { Ensure-Firewall }
-      Step 'current-user logon startup' { Ensure-Autostart }
+    if ($Command -eq 'supervise') { Start-Supervisor }
+    else {
+      if ($Command -in @('initialize','repair')) {
+        Step 'login configuration' { Ensure-Auth }
+        Step 'storage configuration' { Ensure-Configs }
+        Step 'bundled tools' { Ensure-Tools }
+        Step 'firewall' { Ensure-Firewall }
+        Step 'current-user logon startup' { Ensure-Autostart }
+      }
+      if ($Command -in @('initialize','repair','start')) { Remove-Item -LiteralPath $StopMarker -Force -ErrorAction SilentlyContinue }
+      if ($Command -eq 'status' -and -not $TestMode) {
+        Step 'firewall rules' { Test-FirewallRules }
+        Step 'autostart resilience' { Test-Autostart }
+      }
+      foreach ($port in @(7000,7050,9090,9091)) {
+        $reviewPort = $port
+        if ($Command -eq 'status') { Step "service $port" { Test-Health $reviewPort } }
+        else { Step "service $port" { Start-One $reviewPort } }
+      }
+      if ($Command -in @('initialize','repair','start')) { Launch-Supervisor }
+      Show-Urls
+      Write-Host 'Claude API account/key is NOT included. Configure it with cc_switch.cmd before using 9090 AI tasks.'
+      if ($TestMode) { Write-Host 'TEST RUN: firewall, logon startup, real LAN and paid AI calls were not exercised.' }
     }
-    foreach ($port in @(7000,7050,9090,9091)) {
-      $reviewPort = $port
-      if ($Command -eq 'status') { Step "service $port" { Test-Health $reviewPort } }
-      else { Step "service $port" { Start-One $reviewPort } }
-    }
-    Show-Urls
-    Write-Host 'Claude API account/key is NOT included. Configure it with cc_switch.cmd before using 9090 AI tasks.'
-    if ($TestMode) { Write-Host 'TEST RUN: firewall, logon startup, real LAN and paid AI calls were not exercised.' }
   }
 } catch { $Failures.Add($_.Exception.Message); Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red }
 finally {

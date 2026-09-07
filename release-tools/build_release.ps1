@@ -50,6 +50,8 @@ $gitDestination = Join-Path $Package 'git'
 $extract = Start-Process -FilePath $gitArchive -ArgumentList @('-y',('-o"' + $gitDestination + '"')) -WindowStyle Hidden -PassThru -Wait
 if ($extract.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $gitDestination 'bin\bash.exe'))) { throw 'Portable Git extraction failed.' }
 Copy-Item -Path (Join-Path $PSScriptRoot 'template\*') -Destination $Package -Recurse
+[IO.Directory]::CreateDirectory((Join-Path $Package 'docs')) | Out-Null
+Copy-Item -Path (Join-Path $Project 'docs\*.md') -Destination (Join-Path $Package 'docs')
 # Normalize Windows launch scripts for cmd.exe and Windows PowerShell 5.1.
 Get-ChildItem -LiteralPath $Package -File | Where-Object { $_.Extension -in @('.cmd','.ps1') } | ForEach-Object {
   $text = [IO.File]::ReadAllText($_.FullName).Replace("`r`n","`n").Replace("`n","`r`n")

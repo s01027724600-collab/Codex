@@ -14,3 +14,7 @@ Windows 11 教学机辅助网关源码。
 
 仓库不包含账号、API Key、本机状态、日志、截图、构建缓存或第三方二进制文件。
 
+## 运维文档
+
+- [`docs/BUILD_UPDATE_REPLACE.md`](docs/BUILD_UPDATE_REPLACE.md)：面向本地 AI/技术人员的拉取、测试、构建、打包、替换与回滚步骤。
+- [`docs/RUNTIME_OPERATIONS.md`](docs/RUNTIME_OPERATIONS.md)：自启动监督、局域网通道、防火墙、诊断及日常操作说明。
