@@ -8,10 +8,10 @@ $Package = Join-Path $OutputRoot 'TeachingGateway-x64'
 [IO.Directory]::CreateDirectory($Package) | Out-Null
 $utf8 = [Text.UTF8Encoding]::new($false)
 $builds = @(
-  @{port=7000; name='course_monitor'; version='0.3.1'; app='course-collector'; extra=@('--add-data', ((Join-Path $Project 'p7000\ui.html') + ';.'),'--hidden-import','tkinter')},
-  @{port=7050; name='touchpad_gateway'; version='0.2.5'; app='claude-code-gateway-touchpad'; extra=@('--add-data', ((Join-Path $Project 'p7050\ui.html') + ';.'))},
-  @{port=9090; name='claude_gateway_agent'; version='0.1.3'; app='claude-code-gateway'; extra=@()},
-  @{port=9091; name='kill_gateway'; version='0.1.0'; app='claude-code-gateway-kill'; extra=@()}
+  @{port=7000; name='course_monitor'; version='0.3.3'; app='course-collector'; extra=@('--add-data', ((Join-Path $Project 'p7000\ui.html') + ';.'),'--hidden-import','tkinter')},
+  @{port=7050; name='touchpad_gateway'; version='0.2.8'; app='claude-code-gateway-touchpad'; extra=@('--add-data', ((Join-Path $Project 'p7050\ui.html') + ';.'))},
+  @{port=9090; name='claude_gateway_agent'; version='0.1.5'; app='claude-code-gateway'; extra=@()},
+  @{port=9091; name='kill_gateway'; version='0.1.1'; app='claude-code-gateway-kill'; extra=@()}
 )
 foreach ($build in $builds) {
   $port = $build.port
@@ -50,6 +50,8 @@ $gitDestination = Join-Path $Package 'git'
 $extract = Start-Process -FilePath $gitArchive -ArgumentList @('-y',('-o"' + $gitDestination + '"')) -WindowStyle Hidden -PassThru -Wait
 if ($extract.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $gitDestination 'bin\bash.exe'))) { throw 'Portable Git extraction failed.' }
 Copy-Item -Path (Join-Path $PSScriptRoot 'template\*') -Destination $Package -Recurse
+[IO.Directory]::CreateDirectory((Join-Path $Package 'docs')) | Out-Null
+Copy-Item -Path (Join-Path $Project 'docs\*.md') -Destination (Join-Path $Package 'docs')
 # Normalize Windows launch scripts for cmd.exe and Windows PowerShell 5.1.
 Get-ChildItem -LiteralPath $Package -File | Where-Object { $_.Extension -in @('.cmd','.ps1') } | ForEach-Object {
   $text = [IO.File]::ReadAllText($_.FullName).Replace("`r`n","`n").Replace("`n","`r`n")

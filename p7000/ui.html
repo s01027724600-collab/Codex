@@ -84,6 +84,13 @@
   }
   .svg-icon { width: 20px; height: 20px; display: block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   .app-shell { min-height: 100vh; }
+  .login-layer { position:fixed; inset:0; z-index:200; display:grid; place-items:center; padding:20px; background:rgba(245,245,247,.9); -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px); }
+  .login-card { width:min(360px,100%); padding:26px; border:1px solid var(--line-strong); border-radius:var(--radius-xl); background:var(--surface-solid); box-shadow:var(--shadow-float); }
+  .login-card h1 { margin:0 0 6px; font-size:22px; }
+  .login-card p { margin:0 0 18px; color:var(--text-secondary); font-size:13px; }
+  .login-card input { width:100%; height:44px; padding:0 12px; border:1px solid var(--line-strong); border-radius:var(--radius-md); color:var(--text); background:var(--surface-muted); font:inherit; }
+  .login-card .button { width:100%; margin-top:12px; }
+  .login-error { min-height:18px; margin-top:8px; color:var(--red); font-size:12px; }
 
   .sidebar {
     position: fixed;
@@ -198,6 +205,16 @@
   .toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
   .file-browser-panel .browser { height: calc(100vh - 161px); max-height: none; }
   .selection-copy { padding: 0 10px; min-width: 76px; font-size: 12px; text-align: center; white-space: nowrap; }
+  .transfer-strip { margin-bottom:10px; padding:14px; display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .transfer-action { min-width:0; padding:14px; border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--surface-muted); display:flex; align-items:center; gap:12px; }
+  .transfer-copy { min-width:0; flex:1; }
+  .transfer-copy strong,.transfer-copy span { display:block; }
+  .transfer-copy span { margin-top:2px; color:var(--text-secondary); font-size:12px; }
+  .transfer-progress { grid-column:1/-1; min-width:0; padding:3px 2px 0; }
+  .transfer-progress-row { display:flex; justify-content:space-between; gap:12px; color:var(--text-secondary); font-size:12px; }
+  .transfer-progress-row span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .progress-track { height:5px; margin-top:7px; overflow:hidden; border-radius:99px; background:var(--line); }
+  .progress-value { width:0; height:100%; border-radius:inherit; background:var(--accent); transition:width .12s linear; }
 
   .thumb-grid { padding: 12px; display: grid; grid-template-columns: repeat(auto-fill,minmax(180px,1fr)); gap: 10px; }
   .thumb-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface-solid); transition: transform .22s var(--ease),box-shadow .22s var(--ease); }
@@ -302,6 +319,9 @@
     #pane-courses .table-wrap { height: calc(100vh - 220px - env(safe-area-inset-bottom)); }
   }
   @media (max-width:600px) {
+    .transfer-strip { grid-template-columns:1fr; }
+    .transfer-progress { grid-column:1; }
+    .transfer-action { padding:12px; }
     .thumb-grid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; padding: 10px; }
     .thumb-actions .button { flex: 1; padding-inline: 7px; }
     .archive-stat + .archive-stat { border-left: 0; border-top: 1px solid var(--line); }
@@ -324,6 +344,14 @@
 </style>
 </head>
 <body>
+<div class="login-layer hidden" id="login-layer">
+  <form class="login-card" id="login-form">
+    <h1>连接教学台</h1><p>输入初始化时设置的网关密码。</p>
+    <input id="login-password" type="password" autocomplete="current-password" aria-label="网关密码" placeholder="密码" required>
+    <button class="button" type="submit">连接</button>
+    <div class="login-error" id="login-error" role="alert"></div>
+  </form>
+</div>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
   <symbol id="i-file" viewBox="0 0 24 24"><path d="M7 3.5h6l4 4v13H7z"/><path d="M13 3.5v4h4"/></symbol>
@@ -363,6 +391,22 @@
     <div class="content">
       <section class="pane" id="pane-files" aria-labelledby="page-title">
         <select id="roots" class="hidden" aria-hidden="true" tabindex="-1"></select>
+        <div class="panel transfer-strip">
+          <div class="transfer-action">
+            <div class="transfer-copy"><strong>传到教学机</strong><span>支持多选，保存到“平板传输”</span></div>
+            <button class="button secondary" id="upload-files">选择文件</button>
+          </div>
+          <div class="transfer-action">
+            <div class="transfer-copy"><strong>投放本机图片</strong><span>上传后等比例全屏显示</span></div>
+            <button class="button" id="project-local">选择图片</button>
+          </div>
+          <div class="transfer-progress hidden" id="transfer-progress" aria-live="polite">
+            <div class="transfer-progress-row"><span id="transfer-name">准备传输</span><span id="transfer-percent">0%</span></div>
+            <div class="progress-track"><div class="progress-value" id="transfer-value"></div></div>
+          </div>
+          <input class="hidden" id="file-picker" type="file" multiple>
+          <input class="hidden" id="image-picker" type="file" accept=".png,.jpg,.jpeg,.gif,.bmp,image/png,image/jpeg,image/gif,image/bmp">
+        </div>
         <div class="panel file-browser-panel">
           <div class="file-toolbar">
             <div class="toolbar-path">
@@ -476,6 +520,7 @@
   let allShots = [];
   let shotTotal = 0;
   let loadingMoreShots = false;
+  let transferBusy = false;
 
   function toast(message) {
     const node = $('toast');
@@ -486,11 +531,101 @@
   }
 
   async function fetchJSON(url, options) {
-    const response = await fetch(url, options);
+    const response = await fetch(url, Object.assign({credentials:'same-origin'},options || {}));
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '请求失败');
+    if (!response.ok) {
+      if (response.status === 401) showLogin();
+      const error = new Error(data.error || '请求失败');
+      error.status = response.status;
+      throw error;
+    }
     return data;
   }
+
+  function uploadOne(file, project, index, total) {
+    return new Promise((resolve,reject) => {
+      const xhr = new XMLHttpRequest();
+      const url = `/api/upload?name=${encodeURIComponent(file.name)}&project=${project ? '1' : '0'}`;
+      xhr.open('POST',url);
+      xhr.responseType = 'json';
+      xhr.withCredentials = true;
+      xhr.upload.onprogress = event => {
+        if (!event.lengthComputable) return;
+        const overall = ((index + event.loaded / event.total) / total) * 100;
+        $('transfer-percent').textContent = `${Math.round(overall)}%`;
+        $('transfer-value').style.width = `${overall}%`;
+      };
+      xhr.onload = () => {
+        const data = xhr.response || {};
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else {
+          if (xhr.status === 401) showLogin();
+          const error = new Error(data.error || `传输失败（HTTP ${xhr.status}）`);
+          error.status = xhr.status;
+          reject(error);
+        }
+      };
+      xhr.onerror = () => reject(new Error('网络连接中断'));
+      xhr.onabort = () => reject(new Error('传输已取消'));
+      xhr.send(file);
+    });
+  }
+
+  async function uploadSelection(files, project=false) {
+    const items = [...files];
+    if (!items.length || transferBusy) return;
+    transferBusy = true;
+    $('upload-files').disabled = $('project-local').disabled = true;
+    $('transfer-progress').classList.remove('hidden');
+    $('transfer-value').style.width = '0';
+    let last = null;
+    try {
+      for (let index=0; index<items.length; index++) {
+        $('transfer-name').textContent = `${index+1}/${items.length}　${items[index].name}`;
+        last = await uploadOne(items[index],project,index,items.length);
+      }
+      $('transfer-percent').textContent = '完成';
+      $('transfer-value').style.width = '100%';
+      toast(project ? '图片已投放，教学机可点右上角结束' : `${items.length} 个文件已传到教学机`);
+      if (project) $('hide-display').classList.remove('hidden');
+      if (last?.directory) {
+        currentRootKey = 'courses';
+        currentRootPath = roots.find(item => item.key === 'courses')?.path || '';
+        await loadDir(last.directory);
+      }
+    } catch (error) {
+      $('transfer-percent').textContent = '失败';
+      toast(error.message || '传输失败');
+    } finally {
+      transferBusy = false;
+      $('upload-files').disabled = $('project-local').disabled = false;
+      $('file-picker').value = $('image-picker').value = '';
+    }
+  }
+
+  $('upload-files').addEventListener('click',() => $('file-picker').click());
+  $('project-local').addEventListener('click',() => $('image-picker').click());
+  $('file-picker').addEventListener('change',event => uploadSelection(event.target.files,false));
+  $('image-picker').addEventListener('change',event => uploadSelection(event.target.files,true));
+
+  function showLogin() {
+    $('login-layer').classList.remove('hidden');
+    setTimeout(() => $('login-password').focus(),0);
+  }
+
+  $('login-form').addEventListener('submit',async event => {
+    event.preventDefault();
+    $('login-error').textContent = '';
+    try {
+      await fetchJSON('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('login-password').value})});
+      $('login-password').value = '';
+      $('login-layer').classList.add('hidden');
+      await loadRoots();
+      await refreshStatus();
+    } catch (error) {
+      $('login-error').textContent = error.status === 401 ? '密码错误，请重试。' : '暂时无法连接教学机。';
+    }
+  });
 
   const tabCopy = {
     files: ['文件','浏览与传输'],
@@ -717,7 +852,7 @@
     button.disabled = true;
     button.textContent = '正在截图…';
     try {
-      const result = await fetchJSON('/api/shoot');
+      const result = await fetchJSON('/api/shoot',{method:'POST'});
       toast('画面已保存');
       openModal(result.path,`${result.dir} / ${result.name}`);
       if (!$('pane-shots').classList.contains('hidden')) loadShotGallery();
@@ -784,7 +919,7 @@
 
   async function showOnScreen(path) {
     try {
-      await fetchJSON('/api/show?path='+encodeURIComponent(path));
+      await fetchJSON('/api/show?path='+encodeURIComponent(path),{method:'POST'});
       $('hide-display').classList.remove('hidden');
       toast('已投放到教学大屏');
       return true;
@@ -794,7 +929,7 @@
     }
   }
   $('hide-display').addEventListener('click',async () => {
-    try { await fetchJSON('/api/hide'); $('hide-display').classList.add('hidden'); toast('大屏投放已结束'); }
+    try { await fetchJSON('/api/hide',{method:'POST'}); $('hide-display').classList.add('hidden'); toast('大屏投放已结束'); }
     catch (_) { toast('暂时无法结束投放'); }
   });
 
@@ -802,7 +937,7 @@
     const button = event.currentTarget;
     button.disabled = true;
     try {
-      const result = await fetchJSON('/api/scan');
+      const result = await fetchJSON('/api/scan',{method:'POST'});
       toast(result.started ? '已开始扫描课件' : '扫描正在进行');
     }
     catch (_) { toast('扫描请求失败'); }

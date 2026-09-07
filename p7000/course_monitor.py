@@ -19,16 +19,20 @@
 """
 
 import argparse
+import base64
 import ctypes
 import datetime as dt
 import hashlib
+import hmac
 import http.server
+import ipaddress
 import json
 import mimetypes
 import os
 import platform
 import queue
 import re
+import secrets
 import shutil
 import signal
 import string
@@ -46,8 +50,31 @@ from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Tuple
 
 APP_NAME = "course-collector"
-VERSION = "0.3.1"
+VERSION = "0.3.3"
+SESSION_COOKIE = "gateway_session"
 UI_FILE = Path(__file__).with_name("ui.html")
+
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def b64url_decode(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    parts = (password_hash or "").split("$", 3)
+    if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
+        return False
+    try:
+        rounds = int(parts[1])
+        salt = b64url_decode(parts[2])
+        expected = b64url_decode(parts[3])
+    except (ValueError, TypeError):
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, rounds)
+    return hmac.compare_digest(actual, expected)
 
 # Windows GetDriveTypeW 返回值
 DRIVE_REMOVABLE = 2   # 可移动磁盘（U 盘）
@@ -139,6 +166,7 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 PROJECTABLE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp"}
 MAX_ZIP_FILES = 500
 MAX_POST_BYTES = 1 << 20
+MAX_UPLOAD_BYTES = 512 << 20
 
 
 def is_image_name(name: str) -> bool:
@@ -153,9 +181,18 @@ def human_size(num: float) -> str:
     return f"{num:.1f}TB"
 
 
+def fit_size(width: int, height: int, box_width: int, box_height: int) -> Tuple[int, int]:
+    """Fit an image inside a box while preserving its aspect ratio."""
+    width, height = max(1, int(width)), max(1, int(height))
+    scale = min(max(1, int(box_width)) / width, max(1, int(box_height)) / height)
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
 # ---------------------------------------------------------------------------
 # Windows 盘符探测（ctypes，无第三方依赖）
 # ---------------------------------------------------------------------------
+
+_k32 = _u32 = _g32 = None
 
 if is_windows():
     _k32 = ctypes.windll.kernel32
@@ -560,6 +597,10 @@ class Config:
 
     stable_seconds: int = 3         # 下载文件需静置这么久才算完成
     state_dir: str = ""
+    auth_file: str = ""
+    password_hash: str = ""
+    session_secret: str = ""
+    session_days: int = 90
 
     def __post_init__(self) -> None:
         if not self.download_dirs:
@@ -587,6 +628,7 @@ class Config:
             0, int(self.screenshot_retention_days)
         )
         self.stable_seconds = max(0, int(self.stable_seconds))
+        self.session_days = max(1, int(self.session_days))
         self.download_dirs = [str(path) for path in self.download_dirs]
         if not self.state_dir:
             base = os.environ.get("APPDATA") or tempfile.gettempdir()
@@ -1064,6 +1106,7 @@ class DisplayManager:
         self._ready = threading.Event()
         self._root = None
         self._label = None
+        self._close_button = None
         self._img = None
         self._visible = False
         self._visible_lock = threading.Lock()
@@ -1086,6 +1129,13 @@ class DisplayManager:
         self._root.configure(bg="black")
         self._label = tk.Label(self._root, bg="black")
         self._label.pack(fill="both", expand=True)
+        self._close_button = tk.Button(
+            self._root, text="×  结束投放", command=self._set_hidden,
+            font=("Microsoft YaHei UI", 14, "bold"), fg="white", bg="#252525",
+            activeforeground="white", activebackground="#b42318",
+            relief="flat", bd=0, padx=18, pady=10, cursor="hand2",
+        )
+        self._close_button.place(relx=1.0, x=-20, y=20, anchor="ne")
         self._root.bind("<Escape>", lambda e: self._set_hidden())
         # 不再用单击退出：课堂触屏很容易误触。投放可通过 Esc 或网页端结束。
         self._root.withdraw()
@@ -1158,9 +1208,8 @@ class DisplayManager:
                     return False
                 img = tk.PhotoImage(file=str(temp_path))
             else:
-                scale = min(screen_width / img.width(), screen_height / img.height())
-                target_width = max(1, round(img.width() * scale))
-                target_height = max(1, round(img.height() * scale))
+                target_width, target_height = fit_size(
+                    img.width(), img.height(), screen_width, screen_height)
                 if target_width != img.width() or target_height != img.height():
                     fd, temp_name = tempfile.mkstemp(prefix="7000-display-", suffix=".png")
                     os.close(fd)
@@ -1178,6 +1227,8 @@ class DisplayManager:
         self._img = img
         self._label.config(image=img)
         self._root.deiconify()
+        if self._close_button is not None:
+            self._close_button.lift()
         try:
             self._root.attributes("-fullscreen", True)
         except Exception:
@@ -1230,6 +1281,7 @@ class FileStore:
         self.root_keys = {r["key"]: r for r in self.roots}
         self._thumb_dir = Path(config.state_dir) / "thumbnails"
         self._thumb_dir.mkdir(parents=True, exist_ok=True)
+        self._upload_lock = threading.Lock()
         self._thumb_lock = threading.Lock()
         self._last_thumb_prune = 0.0
         self._image_cache_lock = threading.Lock()
@@ -1274,6 +1326,50 @@ class FileStore:
                 "exists": p.is_dir(),
             })
         return {"roots": out}
+
+    def save_upload(self, filename: str, stream: BinaryIO, length: int) -> dict:
+        """Stream one tablet file into the course root without overwriting files."""
+        original = re.split(r"[\\/]", str(filename or ""))[-1]
+        safe_name = sanitize_name(original, "平板文件")
+        suffix = Path(safe_name).suffix[:20]
+        stem_limit = max(1, 150 - len(suffix))
+        stem = (Path(safe_name).stem or "平板文件")[:stem_limit].rstrip(" .")
+        reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                    *(f"LPT{i}" for i in range(1, 10))}
+        if stem.upper() in reserved:
+            stem = "_" + stem
+        safe_name = stem + suffix
+        upload_dir = Path(self._config.target_root) / "平板传输"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        with self._upload_lock:
+            destination = upload_dir / safe_name
+            counter = 1
+            while destination.exists():
+                destination = upload_dir / f"{stem} ({counter}){suffix}"
+                counter += 1
+            temporary = upload_dir / f".{destination.name}.{secrets.token_hex(6)}.partial"
+            remaining = int(length)
+            try:
+                with temporary.open("xb") as output:
+                    while remaining:
+                        chunk = stream.read(min(1 << 20, remaining))
+                        if not chunk:
+                            raise OSError("上传连接提前中断")
+                        output.write(chunk)
+                        remaining -= len(chunk)
+                os.replace(temporary, destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+        stat = destination.stat()
+        return {
+            "ok": True,
+            "name": destination.name,
+            "path": str(destination),
+            "directory": str(upload_dir),
+            "size": stat.st_size,
+            "size_h": human_size(stat.st_size),
+            "is_image": is_image_name(destination.name),
+        }
 
     def list_dir(self, raw_path: str) -> Optional[dict]:
         resolved = self.safe_resolve(raw_path)
@@ -1445,14 +1541,64 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
     def app(self) -> "MonitorServer":
         return self.server  # type: ignore[return-value]
 
-    def _send_json(self, obj: object, status: int = 200) -> None:
+    def _send_json(self, obj: object, status: int = 200,
+                   extra_headers: Optional[Dict[str, str]] = None) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def _remote(self) -> str:
+        # These gateways are not deployed behind a trusted reverse proxy.  Never
+        # trust a client-supplied forwarding header for authentication decisions.
+        return self.client_address[0]
+
+    def _cookies(self) -> Dict[str, str]:
+        cookies: Dict[str, str] = {}
+        for item in self.headers.get("Cookie", "").replace(" ", "").split(";"):
+            if "=" in item:
+                key, value = item.split("=", 1)
+                cookies[key] = value
+        return cookies
+
+    def _sign(self, payload: str) -> str:
+        digest = hmac.new(self.app.config.session_secret.encode("utf-8"),
+                          payload.encode("utf-8"), hashlib.sha256).digest()
+        return b64url_encode(digest)
+
+    def _session_ok(self) -> bool:
+        if not self.app.config.session_secret:
+            return False
+        raw = self._cookies().get(SESSION_COOKIE, "")
+        if "." not in raw:
+            return False
+        payload, signature = raw.rsplit(".", 1)
+        if not hmac.compare_digest(self._sign(payload), signature):
+            return False
+        try:
+            data = json.loads(b64url_decode(payload).decode("utf-8"))
+            return int(data.get("exp", 0)) >= int(time.time())
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return False
+
+    def _auth_ok(self) -> bool:
+        try:
+            if ipaddress.ip_address(self._remote()).is_loopback:
+                return True
+        except ValueError:
+            pass
+        return self._session_ok()
+
+    def _require_auth(self) -> bool:
+        if self._auth_ok():
+            return True
+        self._send_json({"error": "login required"}, 401)
+        return False
 
     def _send_html(self, html: str, status: int = 200) -> None:
         body = html.encode("utf-8")
@@ -1525,44 +1671,14 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._send_html(html)
             return
-        if path == "/api/status":
-            include_log = q.get("log", ["1"])[0] != "0"
-            self._send_json(self.app.status_json(include_log=include_log))
-            return
         if path == "/health":
             self._send_json({"ok": True, "app": APP_NAME, "version": VERSION})
             return
-        if path == "/api/scan":
-            started = self.app.trigger_scan()
-            self._send_json({"ok": True, "started": started})
+        if not self._require_auth():
             return
-        if path == "/api/shoot":
-            shot = self.app.capturer.shoot_now()
-            if shot is None:
-                self._send_json({"error": "截图失败"}, status=500)
-            else:
-                self.app.filestore.invalidate_image_cache("screenshots")
-                self._send_json(shot)
-            return
-        if path == "/api/show":
-            raw = q.get("path", [""])[0]
-            f = self.app.filestore.file(raw)
-            if f is None or not is_image_name(f.name):
-                self._send_json({"error": "无效图片"}, status=404)
-            elif f.suffix.lower() not in PROJECTABLE_EXTS:
-                self._send_json(
-                    {"error": "该格式暂不支持投放，请使用 PNG、JPG、GIF 或 BMP"},
-                    status=415,
-                )
-            else:
-                if self.app.display.show(str(f)):
-                    self._send_json({"ok": True, "path": str(f)})
-                else:
-                    self._send_json({"error": "投放窗口启动失败"}, status=500)
-            return
-        if path == "/api/hide":
-            self.app.display.hide()
-            self._send_json({"ok": True})
+        if path == "/api/status":
+            include_log = q.get("log", ["1"])[0] != "0"
+            self._send_json(self.app.status_json(include_log=include_log))
             return
         if path == "/api/clipboard":
             self._send_json({"text": get_clipboard_text()})
@@ -1620,6 +1736,100 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/login":
+            raw_body = self._read_request_body()
+            try:
+                request = json.loads((raw_body or b"{}").decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                request = {}
+            if not verify_password(str(request.get("password", "")),
+                                   self.app.config.password_hash):
+                self._send_json({"error": "incorrect password"}, 401)
+                return
+            days = self.app.config.session_days
+            expires_at = int(time.time()) + days * 86400
+            payload = b64url_encode(json.dumps({"exp": expires_at}).encode("utf-8"))
+            cookie = f"{payload}.{self._sign(payload)}"
+            expires = time.strftime("%a, %d %b %Y %H:%M:%S GMT",
+                                    time.gmtime(expires_at))
+            self._send_json({"ok": True}, extra_headers={"Set-Cookie":
+                f"{SESSION_COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Lax; "
+                f"Max-Age={days * 86400}; Expires={expires}"})
+            return
+        if parsed.path == "/logout":
+            self._send_json({"ok": True}, extra_headers={"Set-Cookie":
+                f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"})
+            return
+        if not self._require_auth():
+            return
+        if parsed.path == "/api/upload":
+            query = urllib.parse.parse_qs(parsed.query)
+            filename = query.get("name", [""])[0]
+            project = query.get("project", ["0"])[0] == "1"
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length <= 0:
+                self._send_json({"error": "请选择非空文件"}, status=400)
+                return
+            if length > MAX_UPLOAD_BYTES:
+                self._send_json({"error": "单个文件不能超过 512 MB"}, status=413)
+                return
+            if not filename:
+                self._send_json({"error": "缺少文件名"}, status=400)
+                return
+            if project and Path(filename).suffix.lower() not in PROJECTABLE_EXTS:
+                self._send_json(
+                    {"error": "投放支持 PNG、JPG、GIF 或 BMP；可改用“传文件”保存其他格式"},
+                    status=415,
+                )
+                return
+            try:
+                result = self.app.filestore.save_upload(filename, self.rfile, length)
+            except OSError as exc:
+                self._send_json({"error": f"保存上传文件失败：{exc}"}, status=500)
+                return
+            result["projected"] = False
+            if project:
+                result["projected"] = self.app.display.show(result["path"])
+                if not result["projected"]:
+                    result["error"] = "文件已传到教学机，但全屏投放失败"
+                    self._send_json(result, status=500)
+                    return
+            self._send_json(result, status=201)
+            return
+        if parsed.path == "/api/scan":
+            started = self.app.trigger_scan()
+            self._send_json({"ok": True, "started": started})
+            return
+        if parsed.path == "/api/shoot":
+            shot = self.app.capturer.shoot_now()
+            if shot is None:
+                self._send_json({"error": "截图失败"}, status=500)
+            else:
+                self.app.filestore.invalidate_image_cache("screenshots")
+                self._send_json(shot)
+            return
+        if parsed.path == "/api/show":
+            raw = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
+            f = self.app.filestore.file(raw)
+            if f is None or not is_image_name(f.name):
+                self._send_json({"error": "无效图片"}, status=404)
+            elif f.suffix.lower() not in PROJECTABLE_EXTS:
+                self._send_json(
+                    {"error": "该格式暂不支持投放，请使用 PNG、JPG、GIF 或 BMP"},
+                    status=415,
+                )
+            elif self.app.display.show(str(f)):
+                self._send_json({"ok": True, "path": str(f)})
+            else:
+                self._send_json({"error": "投放窗口启动失败"}, status=500)
+            return
+        if parsed.path == "/api/hide":
+            self.app.display.hide()
+            self._send_json({"ok": True})
+            return
         if parsed.path == "/api/zip":
             raw_body = self._read_request_body()
             if raw_body is None:
@@ -2297,6 +2507,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-root", help="课件归档根目录，例如 D:\\所有已知课件")
     parser.add_argument("--context-root", help="截图根目录，例如 D:\\context")
     parser.add_argument("--state-dir", help="状态/日志目录")
+    parser.add_argument("--auth-file", help="包含网页登录密码哈希和会话密钥的 JSON 文件")
     parser.add_argument("--scan-interval", type=int)
     parser.add_argument("--scan-once", action="store_true",
                         help="只跑一次课件扫描然后退出")
@@ -2316,6 +2527,13 @@ def load_config(args: argparse.Namespace) -> Config:
         cfg.context_root = args.context_root
     if args.state_dir:
         cfg.state_dir = args.state_dir
+    if args.auth_file:
+        cfg.auth_file = args.auth_file
+    if cfg.auth_file:
+        auth = json.loads(Path(cfg.auth_file).read_text(encoding="utf-8-sig"))
+        cfg.password_hash = str(auth.get("password_hash", ""))
+        cfg.session_secret = str(auth.get("session_secret", ""))
+        cfg.session_days = int(auth.get("session_days", cfg.session_days))
     if args.scan_interval:
         cfg.scan_interval = args.scan_interval
     cfg.finalize()
@@ -2343,6 +2561,9 @@ def main() -> int:
         for e in state.snapshot_log(50):
             print(f"[{e['level']}] {e['ts']} {e.get('source','')} {e['message']}")
         return 0
+
+    if not config.password_hash or len(config.session_secret) < 16:
+        raise SystemExit("有效的 --auth-file 是启动 7000 服务的必需项")
 
     capturer = ScreenCapturer(config, state)
     filestore = FileStore(config)
