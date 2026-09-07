@@ -32,6 +32,7 @@ import os
 import platform
 import queue
 import re
+import secrets
 import shutil
 import signal
 import string
@@ -188,6 +189,13 @@ def human_size(num: float) -> str:
             return f"{num:.1f}{unit}" if unit != "B" else f"{int(num)}B"
         num /= 1024
     return f"{num:.1f}TB"
+
+
+def fit_size(width: int, height: int, box_width: int, box_height: int) -> Tuple[int, int]:
+    """Fit an image inside a box while preserving its aspect ratio."""
+    width, height = max(1, int(width)), max(1, int(height))
+    scale = min(max(1, int(box_width)) / width, max(1, int(box_height)) / height)
+    return max(1, round(width * scale)), max(1, round(height * scale))
 
 
 # ---------------------------------------------------------------------------
@@ -1108,6 +1116,7 @@ class DisplayManager:
         self._ready = threading.Event()
         self._root = None
         self._label = None
+        self._close_button = None
         self._img = None
         self._visible = False
         self._visible_lock = threading.Lock()
@@ -1131,15 +1140,15 @@ class DisplayManager:
         self._label = tk.Label(self._root, bg="black")
         self._label.pack(fill="both", expand=True)
         # 电脑端可见的关闭按钮：教师可在大屏上直接点击结束投放。
-        self._close_btn = tk.Button(
+        self._close_button = tk.Button(
             self._root, text="关闭投放", command=self._set_hidden,
             bg="#d70015", fg="#ffffff", activebackground="#a00010",
             activeforeground="#ffffff", relief="flat", bd=0,
             cursor="hand2", font=("Microsoft YaHei", 12, "bold"),
             padx=14, pady=6,
         )
-        self._close_btn.place(relx=1.0, rely=0.0, x=-18, y=18, anchor="ne")
-        self._close_btn.lift()
+        self._close_button.place(relx=1.0, rely=0.0, x=-18, y=18, anchor="ne")
+        self._close_button.lift()
         self._root.bind("<Escape>", lambda e: self._set_hidden())
         # 不再用单击退出：课堂触屏很容易误触。投放可通过关闭按钮、Esc 或网页端结束。
         self._root.withdraw()
@@ -1215,6 +1224,8 @@ class DisplayManager:
         self._img = img
         self._label.config(image=img)
         self._root.deiconify()
+        if self._close_button is not None:
+            self._close_button.lift()
         try:
             self._root.attributes("-fullscreen", True)
         except Exception:
@@ -1267,6 +1278,7 @@ class FileStore:
         self.root_keys = {r["key"]: r for r in self.roots}
         self._thumb_dir = Path(config.state_dir) / "thumbnails"
         self._thumb_dir.mkdir(parents=True, exist_ok=True)
+        self._upload_lock = threading.Lock()
         self._thumb_lock = threading.Lock()
         self._last_thumb_prune = 0.0
         self._image_cache_lock = threading.Lock()
@@ -1331,6 +1343,50 @@ class FileStore:
                 "exists": p.is_dir(),
             })
         return {"roots": out}
+
+    def save_upload(self, filename: str, stream: BinaryIO, length: int) -> dict:
+        """Stream one tablet file into the course root without overwriting files."""
+        original = re.split(r"[\\/]", str(filename or ""))[-1]
+        safe_name = sanitize_name(original, "平板文件")
+        suffix = Path(safe_name).suffix[:20]
+        stem_limit = max(1, 150 - len(suffix))
+        stem = (Path(safe_name).stem or "平板文件")[:stem_limit].rstrip(" .")
+        reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                    *(f"LPT{i}" for i in range(1, 10))}
+        if stem.upper() in reserved:
+            stem = "_" + stem
+        safe_name = stem + suffix
+        upload_dir = Path(self._config.target_root) / "平板传输"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        with self._upload_lock:
+            destination = upload_dir / safe_name
+            counter = 1
+            while destination.exists():
+                destination = upload_dir / f"{stem} ({counter}){suffix}"
+                counter += 1
+            temporary = upload_dir / f".{destination.name}.{secrets.token_hex(6)}.partial"
+            remaining = int(length)
+            try:
+                with temporary.open("xb") as output:
+                    while remaining:
+                        chunk = stream.read(min(1 << 20, remaining))
+                        if not chunk:
+                            raise OSError("上传连接提前中断")
+                        output.write(chunk)
+                        remaining -= len(chunk)
+                os.replace(temporary, destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+        stat = destination.stat()
+        return {
+            "ok": True,
+            "name": destination.name,
+            "path": str(destination),
+            "directory": str(upload_dir),
+            "size": stat.st_size,
+            "size_h": human_size(stat.st_size),
+            "is_image": is_image_name(destination.name),
+        }
 
     def list_dir(self, raw_path: str) -> Optional[dict]:
         resolved = self.safe_resolve(raw_path)
@@ -1620,7 +1676,7 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _handle_upload(self) -> None:
-        """接收平板上传的文件，流式落盘到课件根的「平板上传」目录。"""
+        """接收平板上传的文件，并通过 FileStore 原子地流式落盘。"""
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         filename = upload_filename(q.get("name", [""])[0])
         try:
@@ -1635,44 +1691,17 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "文件过大，单文件上限 512MB"}, status=413)
             return
         try:
-            dest_dir = self.app.filestore.upload_dir()
+            result = self.app.filestore.save_upload(filename, self.rfile, length)
         except OSError as error:
-            self._send_json({"error": f"无法创建上传目录: {error}"}, status=500)
-            return
-        dst = self.app.filestore.unique_dst(dest_dir, filename)
-        tmp_path: Optional[Path] = None
-        try:
-            fd, tmp_name = tempfile.mkstemp(
-                prefix=".7000-up-", suffix=".partial", dir=str(dest_dir)
-            )
-            tmp_path = Path(tmp_name)
-            remaining = length
-            with os.fdopen(fd, "wb") as out:
-                while remaining > 0:
-                    chunk = self.rfile.read(min(1 << 16, remaining))
-                    if not chunk:
-                        raise IOError("上传数据不完整")
-                    out.write(chunk)
-                    remaining -= len(chunk)
-            os.replace(tmp_path, dst)
-            tmp_path = None
-        except (OSError, ValueError) as error:
-            if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
             self._send_json({"error": f"保存失败: {error}"}, status=500)
             return
         self.app.state.add_log(
-            "ok", f"平板上传: {dst.name}",
-            source="平板", file=dst.name, dst=str(dst),
+            "ok", f"平板上传: {result['name']}",
+            source="平板", file=result["name"], dst=result["path"],
         )
-        self._send_json({
-            "ok": True,
-            "path": str(dst),
-            "name": dst.name,
-            "dir": str(dest_dir),
-            "url": "/api/file?path=" + urllib.parse.quote(str(dst)),
-            "is_image": is_image_name(dst.name),
-        })
+        result["dir"] = result["directory"]
+        result["url"] = "/api/file?path=" + urllib.parse.quote(result["path"])
+        self._send_json(result)
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)

@@ -205,6 +205,16 @@
   .toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
   .file-browser-panel .browser { height: calc(100vh - 161px); max-height: none; }
   .selection-copy { padding: 0 10px; min-width: 76px; font-size: 12px; text-align: center; white-space: nowrap; }
+  .transfer-strip { margin-bottom:10px; padding:14px; display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .transfer-action { min-width:0; padding:14px; border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--surface-muted); display:flex; align-items:center; gap:12px; }
+  .transfer-copy { min-width:0; flex:1; }
+  .transfer-copy strong,.transfer-copy span { display:block; }
+  .transfer-copy span { margin-top:2px; color:var(--text-secondary); font-size:12px; }
+  .transfer-progress { grid-column:1/-1; min-width:0; padding:3px 2px 0; }
+  .transfer-progress-row { display:flex; justify-content:space-between; gap:12px; color:var(--text-secondary); font-size:12px; }
+  .transfer-progress-row span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .progress-track { height:5px; margin-top:7px; overflow:hidden; border-radius:99px; background:var(--line); }
+  .progress-value { width:0; height:100%; border-radius:inherit; background:var(--accent); transition:width .12s linear; }
 
   .thumb-grid { padding: 12px; display: grid; grid-template-columns: repeat(auto-fill,minmax(180px,1fr)); gap: 10px; }
   .thumb-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface-solid); transition: transform .22s var(--ease),box-shadow .22s var(--ease); }
@@ -310,6 +320,9 @@
     #pane-courses .table-wrap { height: calc(100vh - 220px - env(safe-area-inset-bottom)); }
   }
   @media (max-width:600px) {
+    .transfer-strip { grid-template-columns:1fr; }
+    .transfer-progress { grid-column:1; }
+    .transfer-action { padding:12px; }
     .thumb-grid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; padding: 10px; }
     .thumb-actions .button { flex: 1; padding-inline: 7px; }
     .archive-stat + .archive-stat { border-left: 0; border-top: 1px solid var(--line); }
@@ -379,6 +392,22 @@
     <div class="content">
       <section class="pane" id="pane-files" aria-labelledby="page-title">
         <select id="roots" class="hidden" aria-hidden="true" tabindex="-1"></select>
+        <div class="panel transfer-strip">
+          <div class="transfer-action">
+            <div class="transfer-copy"><strong>传到教学机</strong><span>支持多选，保存到“平板传输”</span></div>
+            <button class="button secondary" id="upload-files">选择文件</button>
+          </div>
+          <div class="transfer-action">
+            <div class="transfer-copy"><strong>投放本机图片</strong><span>上传后等比例全屏显示</span></div>
+            <button class="button" id="project-local">选择图片</button>
+          </div>
+          <div class="transfer-progress hidden" id="transfer-progress" aria-live="polite">
+            <div class="transfer-progress-row"><span id="transfer-name">准备传输</span><span id="transfer-percent">0%</span></div>
+            <div class="progress-track"><div class="progress-value" id="transfer-value"></div></div>
+          </div>
+          <input class="hidden" id="file-picker" type="file" multiple>
+          <input class="hidden" id="image-picker" type="file" accept=".png,.jpg,.jpeg,.gif,.bmp,image/png,image/jpeg,image/gif,image/bmp">
+        </div>
         <div class="panel file-browser-panel">
           <div class="file-toolbar">
             <div class="toolbar-path">
@@ -498,6 +527,7 @@
   let allShots = [];
   let shotTotal = 0;
   let loadingMoreShots = false;
+  let transferBusy = false;
 
   function toast(message) {
     const node = $('toast');

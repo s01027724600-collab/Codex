@@ -62,6 +62,41 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(len(names), 4)
             archive.close()
 
+    def test_projected_image_fit_preserves_aspect_ratio(self):
+        self.assertEqual(app.fit_size(4000, 2000, 1920, 1080), (1920, 960))
+        self.assertEqual(app.fit_size(1000, 2000, 1920, 1080), (540, 1080))
+
+    def test_tablet_upload_streams_to_transfer_folder_without_overwrite(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            config = app.Config(
+                target_root=str(Path(directory) / 'courses'),
+                context_root=str(Path(directory) / 'shots'),
+                state_dir=str(Path(directory) / 'state'),
+            )
+            store = app.FileStore(config)
+            first = store.save_upload('../lesson.pdf', io.BytesIO(b'first'), 5)
+            second = store.save_upload('lesson.pdf', io.BytesIO(b'second'), 6)
+            self.assertEqual(Path(first['path']).read_bytes(), b'first')
+            self.assertEqual(Path(second['path']).read_bytes(), b'second')
+            self.assertEqual(first['name'], 'lesson.pdf')
+            self.assertEqual(second['name'], 'lesson (1).pdf')
+            self.assertEqual(Path(first['directory']).name, '平板传输')
+
+    def test_interrupted_tablet_upload_leaves_no_partial_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            config = app.Config(
+                target_root=str(Path(directory) / 'courses'),
+                context_root=str(Path(directory) / 'shots'),
+                state_dir=str(Path(directory) / 'state'),
+            )
+            store = app.FileStore(config)
+            with self.assertRaisesRegex(OSError, '提前中断'):
+                store.save_upload('broken.bin', io.BytesIO(b'x'), 2)
+            upload_dir = Path(directory) / 'courses' / '平板传输'
+            self.assertEqual(list(upload_dir.iterdir()), [])
+
     def test_shared_password_hash_is_accepted(self):
         salt = b'0123456789abcdef'
         digest = hashlib.pbkdf2_hmac('sha256', b'classroom-password', salt, 1000)
@@ -95,6 +130,11 @@ class ReleaseTests(unittest.TestCase):
         )
         filestore = Mock()
         filestore.roots_json.return_value = {'roots': []}
+        filestore.save_upload.side_effect = lambda name, stream, length: {
+            'ok': True, 'name': name, 'path': 'C:/courses/' + name,
+            'directory': 'C:/courses', 'size': len(stream.read(length)),
+            'size_h': '3B', 'is_image': False,
+        }
         monitor = Mock()
         monitor.start_scan_async.return_value = True
         server = app.MonitorServer(
@@ -123,6 +163,11 @@ class ReleaseTests(unittest.TestCase):
                 scan = urllib.request.Request(root_url + '/api/scan', data=b'', method='POST')
                 with opener.open(scan) as response:
                     self.assertTrue(json.load(response)['started'])
+                upload = urllib.request.Request(
+                    root_url + '/api/upload?name=notes.txt', data=b'abc', method='POST')
+                with opener.open(upload) as response:
+                    uploaded = json.load(response)
+                self.assertEqual((uploaded['name'], uploaded['size']), ('notes.txt', 3))
         finally:
             server.shutdown()
             server.server_close()
