@@ -1,10 +1,17 @@
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 from touchpad_gateway import PointerController, UiaScanWorker, ScanAssist
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_relative_touchpad_multiplier_has_fixed_steps(self):
+        html = Path(__file__).with_name("ui.html").read_text(encoding="utf-8")
+        self.assertIn('id="relativeScale" type="range" min="0" max="4" step="1"', html)
+        self.assertIn("const relativeScales = [.6, .8, 1, 1.3, 1.6];", html)
+        self.assertIn("pointer.pendingX += dx * relativeScale();", html)
+
     def test_button_lease_expires_and_heartbeat_cannot_resurrect_it(self):
         pointer = PointerController.__new__(PointerController)
         pointer._input_lock = threading.RLock()

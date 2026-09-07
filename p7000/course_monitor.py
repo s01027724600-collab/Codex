@@ -166,11 +166,21 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 PROJECTABLE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp"}
 MAX_ZIP_FILES = 500
 MAX_POST_BYTES = 1 << 20
+# 平板单文件上传上限：流式落盘，仅受磁盘空间约束，不影响其它 JSON 端点。
 MAX_UPLOAD_BYTES = 512 << 20
 
 
 def is_image_name(name: str) -> bool:
     return Path(name).suffix.lower() in IMAGE_EXTS
+
+
+def upload_filename(raw: str) -> str:
+    """把上传文件名清洗成不含路径、不含非法字符的安全文件名。"""
+    name = (raw or "").replace("\\", "/").rsplit("/", 1)[-1]
+    name = INVALID_NAME_CHARS.sub("_", name).strip().strip(".")
+    if not name or name in (".", ".."):
+        name = "上传文件"
+    return name[:180]
 
 
 def human_size(num: float) -> str:
@@ -1129,15 +1139,18 @@ class DisplayManager:
         self._root.configure(bg="black")
         self._label = tk.Label(self._root, bg="black")
         self._label.pack(fill="both", expand=True)
+        # 电脑端可见的关闭按钮：教师可在大屏上直接点击结束投放。
         self._close_button = tk.Button(
-            self._root, text="×  结束投放", command=self._set_hidden,
-            font=("Microsoft YaHei UI", 14, "bold"), fg="white", bg="#252525",
-            activeforeground="white", activebackground="#b42318",
-            relief="flat", bd=0, padx=18, pady=10, cursor="hand2",
+            self._root, text="关闭投放", command=self._set_hidden,
+            bg="#d70015", fg="#ffffff", activebackground="#a00010",
+            activeforeground="#ffffff", relief="flat", bd=0,
+            cursor="hand2", font=("Microsoft YaHei", 12, "bold"),
+            padx=14, pady=6,
         )
-        self._close_button.place(relx=1.0, x=-20, y=20, anchor="ne")
+        self._close_button.place(relx=1.0, rely=0.0, x=-18, y=18, anchor="ne")
+        self._close_button.lift()
         self._root.bind("<Escape>", lambda e: self._set_hidden())
-        # 不再用单击退出：课堂触屏很容易误触。投放可通过 Esc 或网页端结束。
+        # 不再用单击退出：课堂触屏很容易误触。投放可通过关闭按钮、Esc 或网页端结束。
         self._root.withdraw()
         self._ready.set()
         self._root.after(100, self._poll)
@@ -1150,9 +1163,9 @@ class DisplayManager:
                 if item is None:
                     self._set_hidden()
                 elif isinstance(item, tuple):
-                    path, done, result = item
+                    path, fill, done, result = item
                     try:
-                        result["ok"] = self._set_visible(path)
+                        result["ok"] = self._set_visible(path, fill)
                     finally:
                         done.set()
                 else:
@@ -1183,42 +1196,26 @@ class DisplayManager:
         except Exception:
             pass
 
-    def _set_visible(self, path: str) -> bool:
+    def _set_visible(self, path: str, fill: bool = False) -> bool:
         import tkinter as tk
         if self._root is None:
+            return False
+        if Path(path).suffix.lower() not in PROJECTABLE_EXTS:
             return False
         screen_width = max(1, self._root.winfo_screenwidth())
         screen_height = max(1, self._root.winfo_screenheight())
         temp_path: Optional[Path] = None
         try:
-            img = tk.PhotoImage(file=path)
-        except Exception:
-            img = None
-        try:
-            if img is None:
-                if Path(path).suffix.lower() not in PROJECTABLE_EXTS:
-                    return False
-                fd, temp_name = tempfile.mkstemp(prefix="7000-display-", suffix=".png")
-                os.close(fd)
-                temp_path = Path(temp_name)
-                temp_path.unlink(missing_ok=True)
-                if not _gdiplus_scaled_png(
-                        Path(path), temp_path, screen_width, screen_height,
-                        allow_upscale=True):
-                    return False
-                img = tk.PhotoImage(file=str(temp_path))
-            else:
-                target_width, target_height = fit_size(
-                    img.width(), img.height(), screen_width, screen_height)
-                if target_width != img.width() or target_height != img.height():
-                    fd, temp_name = tempfile.mkstemp(prefix="7000-display-", suffix=".png")
-                    os.close(fd)
-                    temp_path = Path(temp_name)
-                    temp_path.unlink(missing_ok=True)
-                    if _gdiplus_scaled_png(
-                            Path(path), temp_path, screen_width, screen_height,
-                            allow_upscale=True):
-                        img = tk.PhotoImage(file=str(temp_path))
+            fd, temp_name = tempfile.mkstemp(prefix="7000-display-", suffix=".png")
+            os.close(fd)
+            temp_path = Path(temp_name)
+            temp_path.unlink(missing_ok=True)
+            # 等比、不裁剪、不扭曲：fill=True 允许放大铺满，fill=False 不放大避免模糊。
+            if not _gdiplus_scaled_png(
+                    Path(path), temp_path, screen_width, screen_height,
+                    allow_upscale=fill):
+                return False
+            img = tk.PhotoImage(file=str(temp_path))
         except Exception:
             return False
         finally:
@@ -1253,10 +1250,10 @@ class DisplayManager:
         with self._visible_lock:
             self._visible = False
 
-    def show(self, path: str) -> bool:
+    def show(self, path: str, fill: bool = False) -> bool:
         done = threading.Event()
         result = {"ok": False}
-        self._queue.put((path, done, result))
+        self._queue.put((path, fill, done, result))
         # 大尺寸 JPEG 首次需要解码和缩放，给 GUI 线程足够时间返回真实结果。
         done.wait(timeout=15)
         return bool(result["ok"])
@@ -1315,6 +1312,26 @@ class FileStore:
             if cand == root or cand.startswith(root + os.sep):
                 return Path(cand)
         return None
+
+    def upload_dir(self) -> Path:
+        """平板上传文件的落盘目录（位于课件根内，自动进入浏览/投放/下载体系）。"""
+        directory = Path(self._config.target_root) / "平板上传"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    @staticmethod
+    def unique_dst(directory: Path, filename: str) -> Path:
+        """同名文件加序号，避免覆盖已有内容。"""
+        candidate = directory / filename
+        if not candidate.exists():
+            return candidate
+        stem, suffix = candidate.stem, candidate.suffix
+        index = 2
+        while True:
+            next_path = directory / f"{stem}({index}){suffix}"
+            if not next_path.exists():
+                return next_path
+            index += 1
 
     def roots_json(self) -> dict:
         out = []
@@ -1658,6 +1675,34 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length) if length else b""
 
+    def _handle_upload(self) -> None:
+        """接收平板上传的文件，并通过 FileStore 原子地流式落盘。"""
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        filename = upload_filename(q.get("name", [""])[0])
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send_json({"error": "无效请求长度"}, status=400)
+            return
+        if length <= 0:
+            self._send_json({"error": "空文件"}, status=400)
+            return
+        if length > MAX_UPLOAD_BYTES:
+            self._send_json({"error": "文件过大，单文件上限 512MB"}, status=413)
+            return
+        try:
+            result = self.app.filestore.save_upload(filename, self.rfile, length)
+        except OSError as error:
+            self._send_json({"error": f"保存失败: {error}"}, status=500)
+            return
+        self.app.state.add_log(
+            "ok", f"平板上传: {result['name']}",
+            source="平板", file=result["name"], dst=result["path"],
+        )
+        result["dir"] = result["directory"]
+        result["url"] = "/api/file?path=" + urllib.parse.quote(result["path"])
+        self._send_json(result)
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
@@ -1762,43 +1807,6 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             return
         if not self._require_auth():
             return
-        if parsed.path == "/api/upload":
-            query = urllib.parse.parse_qs(parsed.query)
-            filename = query.get("name", [""])[0]
-            project = query.get("project", ["0"])[0] == "1"
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                length = -1
-            if length <= 0:
-                self._send_json({"error": "请选择非空文件"}, status=400)
-                return
-            if length > MAX_UPLOAD_BYTES:
-                self._send_json({"error": "单个文件不能超过 512 MB"}, status=413)
-                return
-            if not filename:
-                self._send_json({"error": "缺少文件名"}, status=400)
-                return
-            if project and Path(filename).suffix.lower() not in PROJECTABLE_EXTS:
-                self._send_json(
-                    {"error": "投放支持 PNG、JPG、GIF 或 BMP；可改用“传文件”保存其他格式"},
-                    status=415,
-                )
-                return
-            try:
-                result = self.app.filestore.save_upload(filename, self.rfile, length)
-            except OSError as exc:
-                self._send_json({"error": f"保存上传文件失败：{exc}"}, status=500)
-                return
-            result["projected"] = False
-            if project:
-                result["projected"] = self.app.display.show(result["path"])
-                if not result["projected"]:
-                    result["error"] = "文件已传到教学机，但全屏投放失败"
-                    self._send_json(result, status=500)
-                    return
-            self._send_json(result, status=201)
-            return
         if parsed.path == "/api/scan":
             started = self.app.trigger_scan()
             self._send_json({"ok": True, "started": started})
@@ -1812,7 +1820,9 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(shot)
             return
         if parsed.path == "/api/show":
-            raw = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
+            query = urllib.parse.parse_qs(parsed.query)
+            raw = query.get("path", [""])[0]
+            fill = query.get("fill", ["0"])[0] in ("1", "true", "yes", "on")
             f = self.app.filestore.file(raw)
             if f is None or not is_image_name(f.name):
                 self._send_json({"error": "无效图片"}, status=404)
@@ -1821,8 +1831,8 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                     {"error": "该格式暂不支持投放，请使用 PNG、JPG、GIF 或 BMP"},
                     status=415,
                 )
-            elif self.app.display.show(str(f)):
-                self._send_json({"ok": True, "path": str(f)})
+            elif self.app.display.show(str(f), fill=fill):
+                self._send_json({"ok": True, "path": str(f), "fill": fill})
             else:
                 self._send_json({"error": "投放窗口启动失败"}, status=500)
             return
@@ -1884,6 +1894,9 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 return
             ok = set_clipboard_text(text)
             self._send_json({"ok": ok})
+            return
+        if parsed.path == "/api/upload":
+            self._handle_upload()
             return
         self._send_json({"error": "not found"}, status=404)
 
