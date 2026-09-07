@@ -33,8 +33,8 @@ class PointerPreviewTests(unittest.TestCase):
             second = preview.snapshot()
         self.assertIs(first, second)
         self.assertEqual(grab.call_count, 1)
-        self.assertEqual(first["crop"], {"x": -1200, "y": -100, "width": 720, "height": 420})
-        for key, expected in (("overview", (480, 240)), ("detail", (720, 420))):
+        self.assertEqual(first["crop"], {"x": -1200, "y": -100, "width": 960, "height": 540})
+        for key, expected in (("overview", (512, 256)), ("detail", (960, 540))):
             encoded = first[key].split(",", 1)[1]
             with Image.open(io.BytesIO(base64.b64decode(encoded))) as frame:
                 self.assertEqual(frame.size, expected)
@@ -52,7 +52,7 @@ class PointerPreviewTests(unittest.TestCase):
             pointer.position = {"x": 300, "y": 470}
             preview._last_attempt = 0
             followed = preview.snapshot()
-            self.assertEqual(followed["crop"]["x"], -60)
+            self.assertEqual(followed["crop"]["x"], -180)
             self.assertEqual(followed["crop"]["y"], first["crop"]["y"])
             pointer.position = {"x": 280, "y": 480}
             preview._last_attempt = 0
@@ -65,18 +65,28 @@ class PointerPreviewTests(unittest.TestCase):
         def desktop(**_):
             return Image.new("RGB", (pointer.geometry["width"], pointer.geometry["height"]))
         with patch("touchpad_gateway.ImageGrab.grab", side_effect=desktop):
-            self.assertEqual(preview.snapshot()["crop"], {"x": 480, "y": 680, "width": 720, "height": 420})
+            self.assertEqual(preview.snapshot()["crop"], {"x": 240, "y": 560, "width": 960, "height": 540})
             pointer.position = {"x": 1180, "y": 1080}
             preview._last_attempt = 0
-            self.assertEqual(preview.snapshot()["crop"], {"x": 480, "y": 680, "width": 720, "height": 420})
+            self.assertEqual(preview.snapshot()["crop"], {"x": 240, "y": 560, "width": 960, "height": 540})
             pointer.geometry = {"x": -1280, "y": 0, "width": 1280, "height": 720}
             pointer.position = {"x": -300, "y": 400}
             preview._last_attempt = 0
-            self.assertEqual(preview.snapshot()["crop"], {"x": -720, "y": 190, "width": 720, "height": 420})
+            self.assertEqual(preview.snapshot()["crop"], {"x": -960, "y": 130, "width": 960, "height": 540})
             pointer.geometry = {"x": 0, "y": 0, "width": 640, "height": 360}
             pointer.position = {"x": 1, "y": 1}
             preview._last_attempt = 0
             self.assertEqual(preview.snapshot()["crop"], {"x": 0, "y": 0, "width": 640, "height": 360})
+
+    def test_active_detail_can_omit_the_slow_overview_frame(self):
+        preview = PointerPreview(FakePointer())
+        with patch("touchpad_gateway.ImageGrab.grab", return_value=Image.new("RGB", (2400, 1200))) as grab:
+            full = preview.snapshot()
+            detail_only = preview.snapshot(include_overview=False)
+        self.assertIn("overview", full)
+        self.assertNotIn("overview", detail_only)
+        self.assertIn("detail", detail_only)
+        self.assertEqual(grab.call_count, 1)
 
     def test_capture_failure_is_throttled_and_recovers(self):
         preview = PointerPreview(FakePointer())
@@ -107,9 +117,9 @@ class PointerPreviewTests(unittest.TestCase):
                 with urllib.request.urlopen(url) as response:
                     self.assertEqual(json.load(response), {"ok": True})
                     self.assertEqual(response.headers["Cache-Control"], "no-store")
-                request = urllib.request.Request(url, headers={"X-Forwarded-For": "192.0.2.1"})
-                with self.assertRaises(urllib.error.HTTPError) as raised:
-                    urllib.request.urlopen(request)
+                with patch.object(Handler, "_remote", return_value="192.0.2.1"):
+                    with self.assertRaises(urllib.error.HTTPError) as raised:
+                        urllib.request.urlopen(url)
                 self.assertEqual(raised.exception.code, 401)
             with patch.object(server.pointer_preview, "snapshot", side_effect=RuntimeError("desktop unavailable")):
                 with self.assertRaises(urllib.error.HTTPError) as raised:
