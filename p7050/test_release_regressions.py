@@ -6,6 +6,16 @@ from touchpad_gateway import PointerController, UiaScanWorker, ScanAssist
 
 
 class ReleaseTests(unittest.TestCase):
+    @staticmethod
+    def pointer_for_movement():
+        pointer = PointerController.__new__(PointerController)
+        pointer._input_lock = threading.RLock()
+        pointer.user32 = Mock()
+        pointer.user32.SetCursorPos.return_value = 1
+        pointer.screen = Mock(return_value={"x": -100, "y": 0, "width": 200, "height": 100})
+        pointer.cursor = Mock(return_value={"x": 12, "y": 34})
+        return pointer
+
     def test_relative_touchpad_multiplier_has_fixed_steps(self):
         html = Path(__file__).with_name("ui.html").read_text(encoding="utf-8")
         self.assertIn('id="relativeScale" type="range" min="0" max="4" step="1"', html)
@@ -43,6 +53,24 @@ class ReleaseTests(unittest.TestCase):
         pointer.user32.SendInput.return_value = 0
         with self.assertRaisesRegex(OSError, 'injected 0 of 1'):
             pointer._send_mouse((1, 3, 4, 0))
+
+    def test_movement_uses_cursor_position_not_synthetic_move_stream(self):
+        pointer = self.pointer_for_movement()
+        pointer.move_absolute(.5, .5)
+        pointer.user32.SetCursorPos.assert_called_once_with(0, 49)
+        pointer.user32.SendInput.assert_not_called()
+
+        pointer.user32.SetCursorPos.reset_mock()
+        pointer.cursor.side_effect = [{"x": 90, "y": 95}, {"x": 90, "y": 95}]
+        pointer.move_relative(20, 20, 1.0)
+        pointer.user32.SetCursorPos.assert_called_once_with(99, 99)
+        pointer.user32.SendInput.assert_not_called()
+
+    def test_cursor_position_failure_is_reported(self):
+        pointer = self.pointer_for_movement()
+        pointer.user32.SetCursorPos.return_value = 0
+        with self.assertRaisesRegex(OSError, "SetCursorPos failed"):
+            pointer.move_absolute(.5, .5)
 
     def test_snapshot_timeout_stops_worker(self):
         worker = UiaScanWorker('', '')

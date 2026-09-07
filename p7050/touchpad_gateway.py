@@ -25,7 +25,7 @@ except ImportError:
     Image = ImageGrab = None
 
 APP_NAME = "claude-code-gateway-touchpad"
-VERSION = "0.2.7"
+VERSION = "0.2.8"
 SESSION_COOKIE = "gateway_session"
 
 MOUSEEVENTF_MOVE = 0x0001
@@ -500,6 +500,8 @@ class PointerController:
         self.user32 = ctypes.windll.user32
         self.user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
         self.user32.SendInput.restype = wintypes.UINT
+        self.user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.user32.SetCursorPos.restype = wintypes.BOOL
         try:
             if not self.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
                 self.user32.SetProcessDPIAware()
@@ -578,11 +580,8 @@ class PointerController:
 
     def move_absolute(self, nx: float, ny: float) -> dict:
         with self._input_lock:
-            nx = max(0.0, min(1.0, float(nx)))
-            ny = max(0.0, min(1.0, float(ny)))
-            self._send_mouse((MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE |
-                              MOUSEEVENTF_VIRTUALDESK,
-                              round(nx * 65535), round(ny * 65535), 0))
+            x, y = self.absolute_point(nx, ny)
+            self._set_cursor(x, y)
             cursor = self.cursor()
         return {"ok": True, **cursor}
 
@@ -594,13 +593,24 @@ class PointerController:
                                      round(cursor["x"] + float(dx) * float(sensitivity))))
             y = max(screen["y"], min(screen["y"] + screen["height"] - 1,
                                      round(cursor["y"] + float(dy) * float(sensitivity))))
-            nx = (x - screen["x"]) / max(1, screen["width"] - 1)
-            ny = (y - screen["y"]) / max(1, screen["height"] - 1)
-            self._send_mouse((MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE |
-                              MOUSEEVENTF_VIRTUALDESK,
-                              round(nx * 65535), round(ny * 65535), 0))
+            self._set_cursor(x, y)
             cursor = self.cursor()
         return {"ok": True, **cursor}
+
+    def _set_cursor(self, x: int, y: int) -> None:
+        """Move independently of the synthetic mouse-input stream.
+
+        Windows can temporarily stop consuming injected MOVE packets after the
+        window underneath an injected click is minimized or destroyed.  A real
+        touch wakes that stream again, which made the tablet appear frozen until
+        somebody touched the teaching display.  SetCursorPos updates the cursor
+        directly and is not coupled to that device/input-stream state; SendInput
+        remains in use for buttons and the wheel, where real input semantics are
+        required.
+        """
+        if not self.user32.SetCursorPos(int(x), int(y)):
+            error = getattr(ctypes, "get_last_error", lambda: 0)()
+            raise OSError(error, f"SetCursorPos failed at ({int(x)}, {int(y)})")
 
     def set_crosshair(self, enabled: bool) -> dict:
         return self.crosshair.set_enabled(enabled)
