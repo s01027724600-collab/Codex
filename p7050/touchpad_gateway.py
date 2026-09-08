@@ -8,6 +8,7 @@ import ipaddress
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -25,8 +26,37 @@ except ImportError:
     Image = ImageGrab = None
 
 APP_NAME = "claude-code-gateway-touchpad"
-VERSION = "0.2.5"
+VERSION = "0.3.2"
 SESSION_COOKIE = "gateway_session"
+
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_WHEEL = 0x0800
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_ABSOLUTE = 0x8000
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("mi", _MOUSEINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _anonymous_ = ("union",)
+    _fields_ = [("type", wintypes.DWORD), ("union", _INPUTUNION)]
 
 
 def load_json(path: str) -> dict:
@@ -34,6 +64,14 @@ def load_json(path: str) -> dict:
         return json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
+
+
+def clamp_sensitivity(value, fallback: float = 1.35) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = float(fallback)
+    return max(1.0, min(5.0, parsed))
 
 
 def app_dir() -> Path:
@@ -469,6 +507,12 @@ class PointerController:
         if os.name != "nt":
             raise RuntimeError("7050 touchpad control only supports Windows")
         self.user32 = ctypes.windll.user32
+        self.user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
+        self.user32.SendInput.restype = wintypes.UINT
+        self.user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.user32.SetCursorPos.restype = wintypes.BOOL
+        self.user32.ClipCursor.argtypes = [ctypes.c_void_p]
+        self.user32.ClipCursor.restype = wintypes.BOOL
         try:
             if not self.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
                 self.user32.SetProcessDPIAware()
@@ -526,6 +570,17 @@ class PointerController:
         self.user32.GetCursorPos(ctypes.byref(point))
         return {"x": int(point.x), "y": int(point.y)}
 
+    def _send_mouse(self, *events: tuple) -> None:
+        inputs = (_INPUT * len(events))()
+        for index, event in enumerate(events):
+            flags, dx, dy, data = event
+            inputs[index].type = 0
+            inputs[index].mi = _MOUSEINPUT(
+                int(dx), int(dy), int(data) & 0xFFFFFFFF, int(flags), 0, 0)
+        sent = int(self.user32.SendInput(len(inputs), inputs, ctypes.sizeof(_INPUT)))
+        if sent != len(inputs):
+            raise OSError(f"SendInput injected {sent} of {len(inputs)} mouse events")
+
     def absolute_point(self, nx: float, ny: float) -> tuple:
         screen = self.screen()
         nx = max(0.0, min(1.0, float(nx)))
@@ -537,18 +592,42 @@ class PointerController:
     def move_absolute(self, nx: float, ny: float) -> dict:
         with self._input_lock:
             x, y = self.absolute_point(nx, ny)
-            self.user32.SetCursorPos(x, y)
+            self._set_cursor(x, y)
             cursor = self.cursor()
         return {"ok": True, **cursor}
 
     def move_relative(self, dx: float, dy: float, sensitivity: float) -> dict:
         with self._input_lock:
             cursor = self.cursor()
-            x = int(cursor["x"] + float(dx) * float(sensitivity))
-            y = int(cursor["y"] + float(dy) * float(sensitivity))
-            self.user32.SetCursorPos(x, y)
+            screen = self.screen()
+            x = max(screen["x"], min(screen["x"] + screen["width"] - 1,
+                                     round(cursor["x"] + float(dx) * float(sensitivity))))
+            y = max(screen["y"], min(screen["y"] + screen["height"] - 1,
+                                     round(cursor["y"] + float(dy) * float(sensitivity))))
+            self._set_cursor(x, y)
             cursor = self.cursor()
         return {"ok": True, **cursor}
+
+    def _set_cursor(self, x: int, y: int) -> None:
+        """Move independently of the synthetic mouse-input stream.
+
+        Windows can temporarily stop consuming injected MOVE packets after the
+        window underneath an injected click is minimized or destroyed.  A real
+        touch wakes that stream again, which made the tablet appear frozen until
+        somebody touched the teaching display.  SetCursorPos updates the cursor
+        directly and is not coupled to that device/input-stream state; SendInput
+        remains in use for buttons and the wheel, where real input semantics are
+        required.
+        """
+        # PowerPoint slide show and a few full-screen applications can leave a
+        # stale ClipCursor rectangle behind while their window is closing. A
+        # physical touch clears that state, which explains the field symptom.
+        # The remote touchpad owns pointer navigation, so release confinement
+        # before every requested move instead of waiting for a physical touch.
+        self.user32.ClipCursor(None)
+        if not self.user32.SetCursorPos(int(x), int(y)):
+            error = getattr(ctypes, "get_last_error", lambda: 0)()
+            raise OSError(error, f"SetCursorPos failed at ({int(x)}, {int(y)})")
 
     def set_crosshair(self, enabled: bool) -> dict:
         return self.crosshair.set_enabled(enabled)
@@ -558,44 +637,47 @@ class PointerController:
 
     def button(self, action: str) -> dict:
         with self._input_lock:
-            event = self.user32.mouse_event
-            left_down = 0x0002
-            left_up = 0x0004
-            right_down = 0x0008
-            right_up = 0x0010
             if action == "down":
-                event(left_down, 0, 0, 0, 0)
+                self._send_mouse((MOUSEEVENTF_LEFTDOWN, 0, 0, 0))
                 self._held = True
                 self._hold_deadline = time.monotonic() + 4.0
             elif action == "up":
-                event(left_up, 0, 0, 0, 0)
+                self._send_mouse((MOUSEEVENTF_LEFTUP, 0, 0, 0))
                 self._held = False
             elif action == "click":
-                event(left_down, 0, 0, 0, 0)
-                event(left_up, 0, 0, 0, 0)
+                self._send_mouse(
+                    (MOUSEEVENTF_LEFTDOWN, 0, 0, 0),
+                    (MOUSEEVENTF_LEFTUP, 0, 0, 0),
+                )
             elif action == "dblclick":
                 for _ in range(2):
-                    event(left_down, 0, 0, 0, 0)
-                    event(left_up, 0, 0, 0, 0)
+                    self._send_mouse(
+                        (MOUSEEVENTF_LEFTDOWN, 0, 0, 0),
+                        (MOUSEEVENTF_LEFTUP, 0, 0, 0),
+                    )
                     time.sleep(0.04)
             elif action == "rightclick":
-                event(right_down, 0, 0, 0, 0)
-                event(right_up, 0, 0, 0, 0)
+                self._send_mouse(
+                    (MOUSEEVENTF_RIGHTDOWN, 0, 0, 0),
+                    (MOUSEEVENTF_RIGHTUP, 0, 0, 0),
+                )
             else:
                 raise ValueError("unknown button action")
         return {"ok": True, "action": action}
 
     def release_buttons(self) -> dict:
         with self._input_lock:
-            self.user32.mouse_event(0x0004, 0, 0, 0, 0)
-            self.user32.mouse_event(0x0010, 0, 0, 0, 0)
+            self._send_mouse(
+                (MOUSEEVENTF_LEFTUP, 0, 0, 0),
+                (MOUSEEVENTF_RIGHTUP, 0, 0, 0),
+            )
             self._held = False
             self._hold_deadline = 0.0
         return {"ok": True}
 
     def wheel(self, delta: int) -> dict:
         with self._input_lock:
-            self.user32.mouse_event(0x0800, 0, 0, int(delta), 0)
+            self._send_mouse((MOUSEEVENTF_WHEEL, 0, 0, int(delta)))
         return {"ok": True, "delta": int(delta)}
 
 
@@ -608,19 +690,24 @@ class PointerPreview:
         self._last_attempt = 0.0
         self._cached = None
         self._last_error = ""
-        self._min_interval = 1.0 / 3.0
+        # Local Wi-Fi can comfortably carry these small JPEG previews. The old
+        # 3 fps cap, plus a 400 ms client timer, made the preview feel slower
+        # than the pointer even when the network was idle.
+        self._min_interval = 1.0 / 6.0
         self._crop = None
         self._crop_screen = None
+        self._overview_data = None
+        self._overview_at = 0.0
 
     @staticmethod
-    def _jpeg(image) -> str:
+    def _jpeg(image, quality: int = 65) -> str:
         with io.BytesIO() as buffer:
-            image.save(buffer, format="JPEG", quality=65)
+            image.save(buffer, format="JPEG", quality=quality, optimize=True)
             return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
     def _detail_crop(self, screen: dict, cursor: dict) -> dict:
-        width = min(720, screen["width"])
-        height = min(420, screen["height"])
+        width = min(960, screen["width"])
+        height = min(540, screen["height"])
         previous = self._crop if self._crop_screen == screen else None
         left = cursor["x"] - width // 2
         top = cursor["y"] - height // 2
@@ -637,7 +724,15 @@ class PointerPreview:
             "height": height,
         }
 
-    def snapshot(self) -> dict:
+    @staticmethod
+    def _response(result: dict, include_overview: bool) -> dict:
+        if include_overview:
+            return result
+        compact = dict(result)
+        compact.pop("overview", None)
+        return compact
+
+    def snapshot(self, include_overview: bool = True) -> dict:
         if ImageGrab is None:
             raise RuntimeError("pointer preview requires Pillow")
         with self._lock:
@@ -645,8 +740,9 @@ class PointerPreview:
                 if self._last_error:
                     raise RuntimeError(self._last_error)
                 if self._cached is not None:
-                    return self._cached
-            self._last_attempt = time.monotonic()
+                    return self._response(self._cached, include_overview)
+            now = time.monotonic()
+            self._last_attempt = now
             try:
                 screen = self.pointer.screen()
                 with ImageGrab.grab(all_screens=True) as desktop:
@@ -657,14 +753,16 @@ class PointerPreview:
                     left = crop["x"] - screen["x"]
                     top = crop["y"] - screen["y"]
                     with desktop.crop((left, top, left + crop["width"], top + crop["height"])) as detail:
-                        detail_data = self._jpeg(detail)
-                    desktop.thumbnail((480, 300), Image.Resampling.BILINEAR)
-                    overview_data = self._jpeg(desktop)
+                        detail_data = self._jpeg(detail, quality=67)
+                    if self._overview_data is None or now - self._overview_at >= 1.0:
+                        desktop.thumbnail((512, 288), Image.Resampling.BILINEAR)
+                        self._overview_data = self._jpeg(desktop, quality=55)
+                        self._overview_at = now
                 result = {
                     "ok": True,
                     "screen": screen,
                     "cursor": cursor,
-                    "overview": overview_data,
+                    "overview": self._overview_data,
                     "detail": detail_data,
                     "crop": crop,
                     "capturedAt": int(time.time() * 1000),
@@ -673,7 +771,7 @@ class PointerPreview:
                 self._crop = crop
                 self._crop_screen = screen.copy()
                 self._last_error = ""
-                return result
+                return self._response(result, include_overview)
             except Exception as exc:
                 self._cached = None
                 self._last_error = str(exc)
@@ -682,6 +780,14 @@ class PointerPreview:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"{APP_NAME}/{VERSION}"
+    protocol_version = "HTTP/1.1"
+
+    def setup(self) -> None:
+        super().setup()
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
 
     def log_message(self, format: str, *args) -> None:
         return
@@ -695,8 +801,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.pointer
 
     def _remote(self) -> str:
-        forwarded = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        return forwarded or self.client_address[0]
+        return self.client_address[0]
 
     def _cookies(self) -> dict:
         out = {}
@@ -799,7 +904,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/pointer-view":
             try:
-                self._send_json(self.server.pointer_preview.snapshot())
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                include_overview = query.get("overview", ["1"])[0] != "0"
+                self._send_json(self.server.pointer_preview.snapshot(include_overview))
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, 503)
             return
@@ -864,10 +971,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/move":
                 if body.get("mode") == "relative":
+                    sensitivity = clamp_sensitivity(
+                        body.get("sensitivity"), self.config.get("sensitivity", 1.35) or 1.35)
                     result = self.pointer.move_relative(
                         float(body.get("dx", 0) or 0),
                         float(body.get("dy", 0) or 0),
-                        float(self.config.get("sensitivity", 1.35) or 1.35),
+                        sensitivity,
                     )
                 else:
                     result = self.pointer.move_absolute(
@@ -928,6 +1037,7 @@ def main() -> int:
         print(f"[7050] WARNING: no password hash loaded from {auth_file}")
 
     server = ThreadingHTTPServer((host, port), Handler)
+    server.daemon_threads = True
     server.config = config
     base_dir = app_dir()
     server.scan_worker = UiaScanWorker(
