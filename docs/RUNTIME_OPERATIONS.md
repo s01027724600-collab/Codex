@@ -4,8 +4,8 @@
 
 - 四项程序只在上课用户登录后运行，不是未登录时运行的 Windows 服务。
 - `initialize.cmd` 和 `repair.cmd` 会立即启动四项程序，并启动隐藏监督器。
-- 登录自启动有两条相同入口：启动文件夹 `TeachingGateway.lnk` 和 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。
-- 两条入口同时触发是安全的：监督器通过独占锁保证只有一个实例工作。
+- 登录自启动有三条相同入口：启动文件夹 `TeachingGateway.lnk`、`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，以及延迟 15 秒的当前用户计划任务 `TeachingGateway-Logon`。
+- 三条入口同时触发是安全的：监督器通过独占锁保证只有一个实例工作。计划任务不依赖 Explorer，专门兼容畅言等替换/限制 Windows 桌面的教育系统。
 - 监督器每 8 秒检查四项 `/health` 与首页；监听消失时立即重启，仍在监听的程序连续三次检查失败才重启，避免一次瞬时超时造成误杀；它只停止并重启本发布目录对应的服务。
 - `stop.cmd` 写入停止标记后再结束程序，防止监督器立即拉起；`start.cmd`、`repair.cmd` 或下次登录会清除标记。
 
@@ -54,11 +54,15 @@ Get-NetFirewallRule -Name 'TeachingGateway-TCP-*' |
 ```powershell
 Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\TeachingGateway.lnk"
 Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name TeachingGateway
+Get-ScheduledTask -TaskName TeachingGateway-Logon | Format-List State,TaskPath
+Get-ScheduledTaskInfo -TaskName TeachingGateway-Logon | Format-List LastRunTime,LastTaskResult
 ```
 
 5. 在任务管理器手动结束一个网关进程，等待最多 20 秒；监听消失会立即触发重启，随后 `status.cmd` 应再次显示该服务 `OK`。
 6. 运行 `stop.cmd`，等待 15 秒；服务不应被重新拉起。
 7. 运行 `start.cmd`，服务和监督器应恢复。
+
+畅言 Windows 10 教育版若重启后失败，先查看 `%LOCALAPPDATA%\TeachingGateway\last-supervisor-start.json`：文件时间未更新表示三个登录入口都被系统策略阻止；时间已更新则说明监督器启动过，应继续检查最新 `supervise-*` 和各端口 `.err.log`。计划任务的 `LastTaskResult` 为 `0` 才表示最近一次启动成功。`0x80070005` 通常表示校方权限策略拒绝，需用管理员账户运行 `repair.cmd` 或联系管理员放行任务计划和程序执行。
 
 ## 日常操作
 

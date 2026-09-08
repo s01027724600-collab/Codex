@@ -26,6 +26,7 @@ $NewPassword = ''
 $StopMarker = Join-Path $StateRoot 'supervisor.stop'
 $SupervisorLock = Join-Path $StateRoot 'supervisor.lock'
 $Restart7050Marker = Join-Path $StateRoot 'restart-7050.request'
+$ScheduledTaskName = 'TeachingGateway-Logon'
 $PortPrograms = @{
   9090 = 'claude_gateway_agent'; 9091 = 'kill_gateway';
   7050 = 'touchpad_gateway'; 7000 = 'course_monitor'
@@ -350,6 +351,36 @@ function Ensure-Autostart {
     New-Item -Path $runKey -Force | Out-Null
     New-ItemProperty -Path $runKey -Name 'TeachingGateway' -Value $runCommand -PropertyType String -Force | Out-Null
     if ((Get-ItemPropertyValue -Path $runKey -Name 'TeachingGateway') -ne $runCommand) { throw 'Current-user Run registry verification failed.' }
+    # Changyan and other education images may replace Explorer or suppress its
+    # Startup/Run processing. Task Scheduler is independent of that shell.
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    $scheduler.Connect()
+    $folder = $scheduler.GetFolder('\')
+    $task = $scheduler.NewTask(0)
+    $task.RegistrationInfo.Description = 'Start and supervise TeachingGateway after classroom-user logon.'
+    $task.Settings.Enabled = $true
+    $task.Settings.StartWhenAvailable = $true
+    $task.Settings.DisallowStartIfOnBatteries = $false
+    $task.Settings.StopIfGoingOnBatteries = $false
+    $task.Settings.ExecutionTimeLimit = 'PT0S'
+    $task.Settings.MultipleInstances = 2
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $task.Principal.UserId = $identity
+    $task.Principal.LogonType = 3
+    $task.Principal.RunLevel = 0
+    $trigger = $task.Triggers.Create(9)
+    $trigger.UserId = $identity
+    $trigger.Delay = 'PT15S'
+    $trigger.Enabled = $true
+    $action = $task.Actions.Create(0)
+    $action.Path = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action.Arguments = $arguments
+    $action.WorkingDirectory = $Root
+    [void]$folder.RegisterTaskDefinition($ScheduledTaskName,$task,6,$null,$null,3,$null)
+    $registered = $folder.GetTask($ScheduledTaskName)
+    if (-not $registered.Enabled -or $registered.Definition.Actions.Item(1).Arguments -notlike '*-Command supervise*') {
+      throw 'Current-user scheduled-task verification failed.'
+    }
   }
 }
 function Test-Autostart {
@@ -361,12 +392,22 @@ function Test-Autostart {
   if ($shortcut.Arguments -notlike '*-Command supervise*' -or $shortcut.Arguments -notlike ('*' + (Join-Path $Root 'gateway_runtime.ps1') + '*')) { throw 'TeachingGateway startup shortcut points to an old package or command.' }
   $runCommand = Get-ItemPropertyValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'TeachingGateway' -ErrorAction Stop
   if ($runCommand -notlike '*-Command supervise*' -or $runCommand -notlike ('*' + (Join-Path $Root 'gateway_runtime.ps1') + '*')) { throw 'TeachingGateway Run entry points to an old package or command.' }
+  $scheduler = New-Object -ComObject 'Schedule.Service'
+  $scheduler.Connect()
+  $task = $scheduler.GetFolder('\').GetTask($ScheduledTaskName)
+  $action = $task.Definition.Actions.Item(1)
+  if (-not $task.Enabled -or $action.Path -notlike '*powershell.exe' -or $action.Arguments -notlike '*-Command supervise*' -or $action.Arguments -notlike ('*' + (Join-Path $Root 'gateway_runtime.ps1') + '*')) {
+    throw 'TeachingGateway scheduled task is disabled or points to an old package.'
+  }
 }
 function Start-Supervisor {
   [IO.Directory]::CreateDirectory($StateRoot) | Out-Null
   try { $lock = [IO.File]::Open($SupervisorLock,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
   catch [IO.IOException] { Write-Host 'A TeachingGateway supervisor is already running.'; return }
   try {
+    Write-Json (Join-Path $StateRoot 'last-supervisor-start.json') ([ordered]@{
+      time=(Get-Date).ToString('o'); package=$Root; pid=$PID; user=[Security.Principal.WindowsIdentity]::GetCurrent().Name
+    })
     Remove-Item -LiteralPath $StopMarker -Force -ErrorAction SilentlyContinue
     Write-Host 'Supervisor active. Services are checked every 8 seconds and restarted after failures.'
     $failureCounts = @{}
@@ -436,6 +477,10 @@ try {
     $link = Join-Path ([Environment]::GetFolderPath('Startup')) 'TeachingGateway.lnk'
     if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link; Write-Host 'Removed TeachingGateway Startup shortcut only. Rerun initialization to restore it.' }
     Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'TeachingGateway' -ErrorAction SilentlyContinue
+    try {
+      $scheduler = New-Object -ComObject 'Schedule.Service'; $scheduler.Connect()
+      $scheduler.GetFolder('\').DeleteTask($ScheduledTaskName,0)
+    } catch { Write-Host 'Scheduled-task autostart was already absent or could not be removed.' }
   } else {
     Assert-Layout
     if ($Command -eq 'supervise') { Start-Supervisor }

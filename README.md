@@ -18,3 +18,4 @@ Windows 11 教学机辅助网关源码。
 
 - [`docs/BUILD_UPDATE_REPLACE.md`](docs/BUILD_UPDATE_REPLACE.md)：面向本地 AI/技术人员的拉取、测试、构建、打包、替换与回滚步骤。
 - [`docs/RUNTIME_OPERATIONS.md`](docs/RUNTIME_OPERATIONS.md)：自启动监督、局域网通道、防火墙、诊断及日常操作说明。
+- [`docs/LOCAL_CODEX_HANDOFF.md`](docs/LOCAL_CODEX_HANDOFF.md)：本次改动、现场故障、版本与本地构建验收的简要交接备注。
